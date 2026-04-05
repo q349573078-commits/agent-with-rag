@@ -1,0 +1,37 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^24.9.1",
+    "cors": "^2.8.5",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@langchain/classic": "^1.0.2",
+    "@langchain/community": "^1.0.2",
+    "@langchain/core": "^1.0.4",
+    "@langchain/mongodb": "^1.0.0",
+    "@langchain/openai": "^1.1.0",
+    "@langchain/textsplitters": "^1.0.0",
+    "@types/express": "^4.17.25",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "langchain": "^1.0.4",
+    "mongodb": "^7.0.0",
+    "multer": "^2.0.2",
+    "nanoid": "^5.1.6",
+    "pdf-parse": "^1.1.4",
+    "zod": "^3.25.76"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
