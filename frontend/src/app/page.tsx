@@ -7,6 +7,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { Send, UploadIcon } from "lucide-react";
 import { ChangeEvent, useState } from "react";
+import { useTypewriter } from "@/hooks/use-typewriter";
 
 type Citation = {
   source: string;
@@ -307,7 +308,12 @@ export default function Home() {
               )}
 
               {thread.map((m, i) => (
-                <ChatRow key={i} msg={m} isLoading={loading && i === thread.length - 1} />
+                <ChatRow 
+                  key={i} 
+                  msg={m} 
+                  isLoading={loading && i === thread.length - 1} 
+                  isLastAssistantMessage={i === thread.length - 1 && m.role === "assistant"}
+                />
               ))}
             </div>
           </ScrollArea>
@@ -395,8 +401,10 @@ export default function Home() {
   );
 }
 
-function ChatRow({ msg, isLoading }: { msg: ChatBubble; isLoading?: boolean }) {
+function ChatRow({ msg, isLoading, isLastAssistantMessage }: { msg: ChatBubble; isLoading?: boolean; isLastAssistantMessage?: boolean }) {
   const isUser = msg.role === "user";
+  const { displayText: typewriterText } = useTypewriter(msg.content, 10, !!isLastAssistantMessage);
+  const displayContent = isLastAssistantMessage ? typewriterText : msg.content;
 
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
@@ -412,8 +420,10 @@ function ChatRow({ msg, isLoading }: { msg: ChatBubble; isLoading?: boolean }) {
            ${isUser ? "bg-blue-500 text-white" : "bg-slate-100 text-slate-900"
             } `}
         >
-          {msg.content ? (
-            <div className="whitespace-pre-wrap">{msg.content}</div>
+          {displayContent ? (
+            <div className="whitespace-pre-wrap">
+              {displayContent}
+            </div>
           ) : (
             isLoading && !isUser && (
               <div className="flex gap-1.5 py-1 items-center">
