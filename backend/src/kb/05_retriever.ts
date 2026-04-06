@@ -1,5 +1,3 @@
-// question -> [Retriever] -> retrive relevant chunks
-
 import { Document } from "@langchain/core/documents";
 import { embeddings } from "../utils/openai";
 import { getKbCollection } from "./03_vectorStore";

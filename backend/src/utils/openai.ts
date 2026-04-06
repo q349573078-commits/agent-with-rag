@@ -1,6 +1,3 @@
-// model instance talk to our model -> openai/gemini/groq
-// switch ->
-
 import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
 import { env } from "./env";
 

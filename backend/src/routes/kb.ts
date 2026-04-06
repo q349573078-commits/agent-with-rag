@@ -13,7 +13,6 @@ const upload = multer({
     fieldSize: 10 * 1021 * 1024, // 10MB
   },
   fileFilter: (req, file, cb) => {
-    // Preserve original filename with proper encoding
     cb(null, true);
   },
 });
@@ -28,20 +27,15 @@ kbRouter.post("/upload", upload.single("file"), async (req, res) => {
         message: "No file uploaded.Please upload a file before proceeding!",
       });
     }
-    //dummy.pdf
     const { path, mimetype, originalname } = req.file;
 
-    // Try to decode filename - handle various encodings
     let decodedName = originalname;
     try {
-      // First try UTF-8 decoding (for Chinese, Japanese, Korean characters)
       decodedName = Buffer.from(originalname, 'latin1').toString('utf-8');
     } catch (e) {
-      // If that fails, try URL decoding
       try {
         decodedName = decodeURIComponent(originalname);
       } catch (e2) {
-        // Fall back to original name
         decodedName = originalname;
       }
     }
@@ -69,7 +63,6 @@ kbRouter.post("/upload", upload.single("file"), async (req, res) => {
       });
     }
 
-    // ingest to our vector store
     const summary = await ingestDocuments(chunks);
 
     return res.status(200).json({

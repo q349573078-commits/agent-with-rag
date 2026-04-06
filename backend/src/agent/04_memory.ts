@@ -1,8 +1,3 @@
-// {
-//     _id, threadId, messages -> RouterRunnable, content, ts
-//     createDeflate, updatedat
-// }
-
 import type { Collection, WithId } from "mongodb";
 import { getDb } from "../utils/mongo";
 import { nanoid } from "nanoid";

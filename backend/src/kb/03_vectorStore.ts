@@ -1,6 +1,3 @@
-// connects -> mongo atlas collection
-// MongoDBAtlasVectorSearch
-
 import { MongoDBAtlasVectorSearch } from "@langchain/mongodb";
 import { Collection as MongoCollection } from "mongodb";
 import { getDb } from "../utils/mongo";

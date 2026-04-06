@@ -1,12 +1,5 @@
-// chunking -> bridge between raw Docs and useful RAG
-// keeping chunks very big -> retriver
-// keeping chunks very small ->
-// small but at the same long enough
-
 import { Document } from "@langchain/core/documents";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
-
-// ABCDE -> ABC, BCD, CDE, DE
 
 const DEFAULT_CHUNK_SIZE = 800;
 const DEFAULT_CHUNK_OVERLAP_SIZE = 150;
