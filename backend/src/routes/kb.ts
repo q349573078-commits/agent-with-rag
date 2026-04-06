@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { unlink } from "fs/promises";
 import multer from "multer";
 import { loadFileAsDocuments } from "../kb/01_loaders";
 import { splitDocuments } from "../kb/02_splitter";
@@ -18,6 +19,8 @@ const upload = multer({
 });
 
 kbRouter.post("/upload", upload.single("file"), async (req, res) => {
+  let uploadedFilePath: string | null = req.file?.path ?? null;
+
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -75,10 +78,18 @@ kbRouter.post("/upload", upload.single("file"), async (req, res) => {
       sources: summary.sources,
     });
   } catch (e) {
-    console.log(e);
     res.status(500).json({
       message: "Something went wrong while uploading the file",
       ok: false,
     });
+  } finally {
+    if (uploadedFilePath) {
+      try {
+        await unlink(uploadedFilePath);
+      } catch (cleanupError) {
+        console.warn("Failed to delete uploaded temp file:", cleanupError);
+      }
+      uploadedFilePath = null;
+    }
   }
 });
