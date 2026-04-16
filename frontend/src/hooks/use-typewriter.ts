@@ -10,27 +10,46 @@ import { useState, useEffect, useRef } from "react";
  */
 export function useTypewriter(text: string, speed: number = 30, enabled: boolean = true) {
   const [displayText, setDisplayText] = useState("");
-  const currentIndexRef = useRef(0);
+  const displayTextRef = useRef("");
+  const pendingTextRef = useRef("");
   const lastUpdateRef = useRef(0);
   const rafIdRef = useRef<number | null>(null);
   const [isFinished, setIsFinished] = useState(false);
 
   useEffect(() => {
+    displayTextRef.current = displayText;
+  }, [displayText]);
+
+  useEffect(() => {
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+
+    lastUpdateRef.current = 0;
+
     // If disabled, just show the whole text immediately
     if (!enabled) {
+      pendingTextRef.current = "";
       setDisplayText(text);
-      currentIndexRef.current = text.length;
+      displayTextRef.current = text;
       setIsFinished(true);
       return;
     }
 
-    // Reset if text is shorter than current (new message or reset)
-    if (text.length < currentIndexRef.current) {
-      currentIndexRef.current = 0;
+    const currentDisplayText = displayTextRef.current;
+
+    // Reset if the incoming text no longer extends what we've already shown.
+    if (!text.startsWith(currentDisplayText)) {
+      pendingTextRef.current = text;
       setDisplayText("");
+      displayTextRef.current = "";
       setIsFinished(false);
-    } else if (text.length > currentIndexRef.current) {
-      setIsFinished(false);
+    } else {
+      pendingTextRef.current = text.slice(currentDisplayText.length);
+      if (pendingTextRef.current.length > 0) {
+        setIsFinished(false);
+      }
     }
 
     const animate = (time: number) => {
@@ -41,30 +60,40 @@ export function useTypewriter(text: string, speed: number = 30, enabled: boolean
       const elapsed = time - lastUpdateRef.current;
 
       if (elapsed >= speed) {
-        if (currentIndexRef.current < text.length) {
-          // Increment the index and update the display text
-          currentIndexRef.current += 1;
-          setDisplayText(text.slice(0, currentIndexRef.current));
-          // Reset lastUpdateRef to current time for next character
+        const nextChunk = pendingTextRef.current.slice(0, 1);
+
+        if (nextChunk.length > 0) {
+          pendingTextRef.current = pendingTextRef.current.slice(1);
+          const nextDisplayText = displayTextRef.current + nextChunk;
+          displayTextRef.current = nextDisplayText;
+          setDisplayText(nextDisplayText);
           lastUpdateRef.current = time;
           setIsFinished(false);
+
+          if (pendingTextRef.current.length === 0) {
+            setIsFinished(true);
+          }
         } else {
           setIsFinished(true);
         }
       }
 
-      // Continue animation as long as there's text left to type
-      if (currentIndexRef.current < text.length) {
+      // Continue animation as long as there's text left to type.
+      if (pendingTextRef.current.length > 0) {
         rafIdRef.current = requestAnimationFrame(animate);
       }
     };
 
-    // Start or restart animation
-    rafIdRef.current = requestAnimationFrame(animate);
+    if (pendingTextRef.current.length > 0) {
+      rafIdRef.current = requestAnimationFrame(animate);
+    } else {
+      setIsFinished(true);
+    }
 
     return () => {
-      if (rafIdRef.current) {
+      if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
       }
     };
   }, [text, speed, enabled]);
