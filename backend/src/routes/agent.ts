@@ -30,11 +30,6 @@ agentRouter.post("/chat", async (req, res) => {
     });
   }
 
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders();
-
   const abortController = new AbortController();
   let clientDisconnected = false;
 
@@ -49,19 +44,27 @@ agentRouter.post("/chat", async (req, res) => {
 
   req.on("close", handleClientDisconnect);
   req.on("aborted", handleClientDisconnect);
+  res.on("close", handleClientDisconnect);
+
+  const assertNotAborted = () => {
+    if (abortController.signal.aborted) {
+      throw new Error("AbortError");
+    }
+  };
+
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
 
   try {
     const threadId = await ensureThreadId(incomingThreadId);
-    if (abortController.signal.aborted) {
-      return;
-    }
+    assertNotAborted();
 
     writeSseEvent(res, "thread", { threadId });
 
     const history = await getHistory(threadId);
-    if (abortController.signal.aborted) {
-      return;
-    }
+    assertNotAborted();
 
     const usermsg = {
       role: "user" as const,
@@ -69,9 +72,7 @@ agentRouter.post("/chat", async (req, res) => {
     };
 
     await appendToHistory(threadId, usermsg);
-    if (abortController.signal.aborted) {
-      return;
-    }
+    assertNotAborted();
 
     writeSseEvent(res, "status", { stage: "searching" });
 
@@ -80,17 +81,13 @@ agentRouter.post("/chat", async (req, res) => {
     const { answer, citations } = await streamProductAgent(
       messagesForAgent,
       (token) => {
-        if (abortController.signal.aborted) {
-          return;
-        }
+        assertNotAborted();
         writeSseEvent(res, "chunk", { content: token });
       },
       abortController.signal
     );
 
-    if (abortController.signal.aborted) {
-      return;
-    }
+    assertNotAborted();
 
     const assistantmsg = {
       role: "assistant" as const,
@@ -120,5 +117,6 @@ agentRouter.post("/chat", async (req, res) => {
   } finally {
     req.off("close", handleClientDisconnect);
     req.off("aborted", handleClientDisconnect);
+    res.off("close", handleClientDisconnect);
   }
 });
