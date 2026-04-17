@@ -59,7 +59,7 @@ function scoreToConfidence(scores: number[]): number {
   }
 
   const bounded = Math.max(0, Math.min(1, confidence));
-  return Number(Math.max(0.6, bounded).toFixed(2));
+  return Number(bounded.toFixed(2));
 }
 
 export async function retrieveRelevantChunks(
