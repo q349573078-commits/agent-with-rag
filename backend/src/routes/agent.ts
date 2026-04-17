@@ -35,11 +35,33 @@ agentRouter.post("/chat", async (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
 
+  const abortController = new AbortController();
+  let clientDisconnected = false;
+
+  const handleClientDisconnect = () => {
+    if (clientDisconnected) {
+      return;
+    }
+
+    clientDisconnected = true;
+    abortController.abort();
+  };
+
+  req.on("close", handleClientDisconnect);
+  req.on("aborted", handleClientDisconnect);
+
   try {
     const threadId = await ensureThreadId(incomingThreadId);
+    if (abortController.signal.aborted) {
+      return;
+    }
+
     writeSseEvent(res, "thread", { threadId });
 
     const history = await getHistory(threadId);
+    if (abortController.signal.aborted) {
+      return;
+    }
 
     const usermsg = {
       role: "user" as const,
@@ -47,6 +69,10 @@ agentRouter.post("/chat", async (req, res) => {
     };
 
     await appendToHistory(threadId, usermsg);
+    if (abortController.signal.aborted) {
+      return;
+    }
+
     writeSseEvent(res, "status", { stage: "searching" });
 
     const messagesForAgent = [...history, usermsg];
@@ -54,9 +80,17 @@ agentRouter.post("/chat", async (req, res) => {
     const { answer, citations } = await streamProductAgent(
       messagesForAgent,
       (token) => {
+        if (abortController.signal.aborted) {
+          return;
+        }
         writeSseEvent(res, "chunk", { content: token });
-      }
+      },
+      abortController.signal
     );
+
+    if (abortController.signal.aborted) {
+      return;
+    }
 
     const assistantmsg = {
       role: "assistant" as const,
@@ -73,11 +107,18 @@ agentRouter.post("/chat", async (req, res) => {
     });
     return res.end();
   } catch (e: any) {
+    if (abortController.signal.aborted) {
+      return;
+    }
+
     console.log(e);
     writeSseEvent(res, "error", {
       ok: false,
       message: "Some error occured",
     });
     return res.end();
+  } finally {
+    req.off("close", handleClientDisconnect);
+    req.off("aborted", handleClientDisconnect);
   }
 });

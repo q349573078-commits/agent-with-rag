@@ -49,7 +49,7 @@ function scoreToConfidence(scores: number[]): number {
 
 export async function retrieveRelevantChunks(
   query: string,
-  k: number = 2
+  k: number = 5
 ): Promise<RetrieverResult> {
   if (!query.trim()) {
     return {

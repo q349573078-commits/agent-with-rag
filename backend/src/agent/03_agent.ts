@@ -109,13 +109,22 @@ async function buildAnswerPlan(messages: { role: string; content: string }[]) {
 
 export async function streamProductAgent(
   messages: { role: string; content: string }[],
-  onToken?: (token: string) => void | Promise<void>
+  onToken?: (token: string) => void | Promise<void>,
+  signal?: AbortSignal
 ): Promise<{ answer: string; citations: AgentCitation[] }> {
+  const assertNotAborted = () => {
+    if (signal?.aborted) {
+      throw new Error("AbortError");
+    }
+  };
+
+  assertNotAborted();
   const { citations, docs, shouldFallback } = await buildAnswerPlan(messages);
   const fallback = "根据现有文档，我无法回答。";
 
   if (shouldFallback) {
     for (const token of fallback) {
+      assertNotAborted();
       await onToken?.(token);
     }
 
@@ -144,10 +153,11 @@ export async function streamProductAgent(
     },
   ];
 
-  const stream = await chatModel.stream(prompt);
+  const stream = await chatModel.stream(prompt, { signal });
   let answer = "";
 
   for await (const chunk of stream) {
+    assertNotAborted();
     const token = extractChunkText(chunk.content);
 
     if (!token) {
