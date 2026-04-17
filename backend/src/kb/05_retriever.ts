@@ -40,25 +40,10 @@ function cosineSimilarity(a: number[], b: number[]): number {
 
 function scoreToConfidence(scores: number[]): number {
   const finiteScores = scores.filter((score) => Number.isFinite(score));
-
   if (!finiteScores.length) return 0;
 
   const maxScore = Math.max(...finiteScores);
-  const minScore = Math.min(...finiteScores);
-
-  let confidence = 0;
-
-  if (maxScore <= 1 && minScore >= 0) {
-    confidence = maxScore;
-  } else if (maxScore <= 1 && minScore >= -1) {
-    confidence = (maxScore + 1) / 2;
-  } else if (minScore >= 0) {
-    confidence = 1 / (1 + minScore);
-  } else {
-    confidence = 1 / (1 + Math.abs(minScore));
-  }
-
-  const bounded = Math.max(0, Math.min(1, confidence));
+  const bounded = Math.max(0, Math.min(1, maxScore));
   return Number(bounded.toFixed(2));
 }
 
