@@ -1,10 +1,10 @@
 import { Response, Router } from "express";
-import { streamProductAgent } from "../agent/03_agent";
+import { streamProductAgent } from "../agent/02_agent";
 import {
   appendToHistory,
   ensureThreadId,
   getHistory,
-} from "../agent/04_memory";
+} from "../agent/03_memory";
 
 export const agentRouter = Router();
 
