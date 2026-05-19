@@ -17,8 +17,9 @@ npm install
 2. 配置环境变量（创建 `.env` 文件）：
 ```env
 OPENAI_API_KEY=your_api_key
-MONGODB_URI=your_mongodb_uri
-PORT=3001
+MONGODB_ATLAS_URI=your_mongodb_atlas_uri
+MONGODB_DB_NAME=your_db_name
+PORT=5000
 ```
 
 3. 启动开发服务器：
