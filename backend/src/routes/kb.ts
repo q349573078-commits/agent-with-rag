@@ -18,7 +18,7 @@ import { getMongoConnectionInfo, MongoDnsHijackError } from "../utils/mongo";
 
 export const kbRouter = Router();
 
-const MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024;
+const MAX_UPLOAD_SIZE_BYTES = 20 * 1024 * 1024;
 const uploadDir = "uploads";
 const allowedExtensions = new Set([".pdf", ".txt", ".md", ".markdown"]);
 const allowedMimeTypes = new Set([
@@ -59,7 +59,7 @@ function getUploadErrorResponse(error: unknown): {
     if (error.code === "LIMIT_FILE_SIZE") {
       return {
         statusCode: 400,
-        message: "File is too large. Maximum size is 10MB.",
+        message: "File is too large. Maximum size is 20MB.",
       };
     }
 
