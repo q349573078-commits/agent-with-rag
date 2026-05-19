@@ -5,8 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
-import { Send, UploadIcon } from "lucide-react";
-import { ChangeEvent, useState } from "react";
+import { CheckCircle2, Info, Loader2, Send, Trash2, UploadIcon, XCircle } from "lucide-react";
+import { ChangeEvent, useCallback, useEffect, useState } from "react";
 import { useTypewriter } from "@/hooks/use-typewriter";
 
 type Citation = {
@@ -57,6 +57,25 @@ type ChatBubble = {
   citations?: Citation[];
 };
 
+type KbFileListItem = {
+  id?: string | null;
+  name: string;
+  uploadedAt?: string | null;
+  chunkCount?: number | null;
+  sha256?: string | null;
+  legacy?: boolean;
+};
+
+type UploadStatus = "idle" | "uploading" | "success" | "error" | "skipped";
+
+async function sha256Hex(file: File): Promise<string> {
+  const buf = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 function parseSseBlock(block: string): StreamEvent | null {
   const lines = block.split(/\r?\n/);
   let event = "";
@@ -99,43 +118,213 @@ export default function Home() {
   // KB upload UI/panel
   const [showUploadPanel, setShowUploadPanel] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<UploadStatus>("idle");
   const [ingestRes, setIngestRes] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [kbUploading, setKbUploading] = useState(false);
+  const [kbFilesLoading, setKbFilesLoading] = useState(false);
+  const [kbFilesError, setKbFilesError] = useState<string | null>(null);
+  const [kbDeleteError, setKbDeleteError] = useState<string | null>(null);
+  const [kbDeletingKey, setKbDeletingKey] = useState<string | null>(null);
+  const [kbFiles, setKbFiles] = useState<KbFileListItem[]>([]);
+  const [kbHealthError, setKbHealthError] = useState<string | null>(null);
+
+  const BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5000";
+
+  const checkKbHealth = useCallback(async () => {
+    setKbHealthError(null);
+    try {
+      const res = await fetch(`${BASE}/kb/health`, { method: "GET" });
+      const json = await res.json();
+      if (!res.ok || !json?.ok) {
+        setKbHealthError(json?.message || "KB backend is unavailable");
+        return false;
+      }
+      return true;
+    } catch {
+      setKbHealthError("KB backend is unavailable");
+      return false;
+    }
+  }, [BASE]);
+
+  const fetchKbFiles = useCallback(async () => {
+    setKbFilesLoading(true);
+    setKbFilesError(null);
+    try {
+      const res = await fetch(`${BASE}/kb/files`, { method: "GET" });
+      const json = await res.json();
+      if (!res.ok || !json?.ok) {
+        setKbFilesError(json?.message || "Failed to load KB files");
+        setKbFiles([]);
+        return;
+      }
+
+      const files = Array.isArray(json.files) ? json.files : [];
+      setKbFiles(
+        files
+          .map((f: any) => ({
+            id: typeof f?.id === "string" || f?.id === null ? f.id : null,
+            name: typeof f?.name === "string" ? f.name : "unknown",
+            uploadedAt:
+              typeof f?.uploadedAt === "string" || f?.uploadedAt === null
+                ? f.uploadedAt
+                : null,
+            chunkCount: typeof f?.chunkCount === "number" ? f.chunkCount : null,
+            sha256: typeof f?.sha256 === "string" || f?.sha256 === null ? f.sha256 : null,
+            legacy: !!f?.legacy,
+          }))
+          .filter((f: KbFileListItem) => f.name.trim().length > 0)
+      );
+    } catch {
+      setKbFilesError("Failed to load KB files");
+      setKbFiles([]);
+    } finally {
+      setKbFilesLoading(false);
+    }
+  }, [BASE]);
+
+  const deleteKbFile = useCallback(
+    async (file: KbFileListItem) => {
+      setKbDeleteError(null);
+      const deletingKey = file.id || `${file.name}::${file.sha256 ?? ""}::legacy`;
+      setKbDeletingKey(deletingKey);
+      try {
+        const url = file.id
+          ? `${BASE}/kb/files/${encodeURIComponent(file.id)}`
+          : `${BASE}/kb/files?name=${encodeURIComponent(file.name)}`;
+        const res = await fetch(url, { method: "DELETE" });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.ok) {
+          setKbDeleteError(json?.message || "Failed to delete KB file");
+          return;
+        }
+        fetchKbFiles();
+      } catch {
+        setKbDeleteError("Failed to delete KB file");
+      } finally {
+        setKbDeletingKey(null);
+      }
+    },
+    [BASE, fetchKbFiles]
+  );
+
+  const checkAlreadyUploaded = useCallback(async (file: File): Promise<{
+    exists: boolean;
+    matchBy: "hash" | "name";
+  }> => {
+    try {
+      const hash = await sha256Hex(file);
+      const res = await fetch(
+        `${BASE}/kb/files/exists?hash=${encodeURIComponent(hash)}`
+      );
+      const json = await res.json();
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.message || "KB backend is unavailable");
+      }
+      return { exists: !!json?.exists, matchBy: "hash" };
+    } catch {
+      const res = await fetch(
+        `${BASE}/kb/files/exists?name=${encodeURIComponent(file.name)}`
+      );
+      const json = await res.json();
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.message || "KB backend is unavailable");
+      }
+      return { exists: !!json?.exists, matchBy: "name" };
+    }
+  }, [BASE]);
+
+  useEffect(() => {
+    if (!showUploadPanel) return;
+    (async () => {
+      const ok = await checkKbHealth();
+      if (ok) {
+        fetchKbFiles();
+      }
+    })();
+  }, [showUploadPanel, fetchKbFiles, checkKbHealth]);
 
   async function uploadFile(file: File) {
+    setUploadStatus("uploading");
     setUploadMsg("Uploading...");
     try {
       const fd = new FormData();
       fd.append("file", file);
-
-      const BASE =
-        process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5000";
 
       const res = await fetch(`${BASE}/kb/upload`, {
         method: "POST",
         body: fd,
       });
 
-      const json = await res.json();
-      setIngestRes(JSON.stringify(json, null, 2));
+      const json = await res.json().catch(() => null);
+      setIngestRes(json ? JSON.stringify(json, null, 2) : null);
 
-      if (res.ok && json.ok) {
-        setUploadMsg("Uploaded and ingested into KB");
+      if (res.ok && json?.ok) {
+        if (json?.skipped) {
+          setUploadStatus("skipped");
+          setUploadMsg("Already uploaded. Skipped.");
+        } else {
+          setUploadStatus("success");
+          setUploadMsg("Uploaded and ingested into KB");
+        }
+        fetchKbFiles();
       } else {
-        setUploadMsg("Upload or ingest failed");
+        setUploadStatus("error");
+        setUploadMsg(
+          (typeof json?.message === "string" && json.message.trim().length > 0
+            ? json.message
+            : typeof json?.errorMessage === "string" &&
+                json.errorMessage.trim().length > 0
+              ? json.errorMessage
+              : null) || `Upload failed (HTTP ${res.status})`
+        );
       }
     } catch (e) {
-      setUploadMsg("Upload Failed...");
+      setUploadStatus("error");
+      setUploadMsg(e instanceof Error ? e.message : "Upload Failed...");
     }
   }
 
-  function onFileInput(e: ChangeEvent<HTMLInputElement>) {
+  async function onFileInput(e: ChangeEvent<HTMLInputElement>) {
+    const inputEl = e.currentTarget;
     const file = e.target.files?.[0];
-    if (file) {
-      setSelectedFile(file.name);
-      uploadFile(file);
+    if (!file) {
+      inputEl.value = "";
+      return;
     }
-    e.currentTarget.value = "";
+
+    setKbUploading(true);
+    try {
+      setSelectedFile(file.name);
+      setUploadMsg(null);
+      setUploadStatus("uploading");
+      setIngestRes(null);
+      try {
+        const check = await checkAlreadyUploaded(file);
+        if (check.exists) {
+          setUploadStatus("skipped");
+          setUploadMsg(
+            check.matchBy === "hash"
+              ? "Already uploaded (content match). Skipped."
+              : "Already uploaded (name match). Skipped."
+          );
+          fetchKbFiles();
+        } else {
+          await uploadFile(file);
+        }
+      } catch (err) {
+        setUploadStatus("error");
+        setUploadMsg(
+          err instanceof Error
+            ? err.message || "KB backend is unavailable. Upload skipped."
+            : "KB backend is unavailable. Upload skipped."
+        );
+      }
+    } finally {
+      setKbUploading(false);
+      setSelectedFile(null);
+      inputEl.value = "";
+    }
   }
 
   async function onRun() {
@@ -172,9 +361,6 @@ export default function Home() {
     setLoading(true);
 
     try {
-      const BASE =
-        process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5000";
-
       const res = await fetch(`${BASE}/agent/chat`, {
         method: "POST",
         headers: {
@@ -353,18 +539,22 @@ export default function Home() {
               </div>
             </div>
 
-            <ScrollArea className="flex-1 p-4 space-y-4">
-              <div className="space-y-2">
+            <div className="flex-1 min-h-0 p-4 flex flex-col gap-4">
+              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm space-y-3">
                 <div className="rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 p-4">
                   <label
                     htmlFor="file-upload"
-                    className="flex items-center gap-2 cursor-pointer p-2 hover:bg-slate-100 rounded-lg transition-colors"
+                    className={`flex items-center gap-2 p-2 rounded-lg transition-colors ${kbUploading ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-slate-100"}`}
                   >
                     <svg className="w-5 h-5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m0-3v12" />
                     </svg>
                     <span className="text-sm text-slate-600 flex-1">
-                      {selectedFile || "Click to upload file..."}
+                      {kbUploading
+                        ? selectedFile
+                          ? selectedFile
+                          : "Uploading..."
+                        : selectedFile || "Click to upload file..."}
                     </span>
                   </label>
                   <input
@@ -372,28 +562,124 @@ export default function Home() {
                     accept=".pdf,.txt,.md, application/pdf, text/plain, text/markdown"
                     onChange={onFileInput}
                     id="file-upload"
+                    disabled={kbUploading}
                     className="hidden"
                   />
                 </div>
+                {uploadMsg && (
+                  <div
+                    className={`flex items-center gap-2 text-xs ${
+                      uploadStatus === "success"
+                        ? "text-green-700"
+                        : uploadStatus === "skipped"
+                          ? "text-amber-700"
+                          : uploadStatus === "error"
+                            ? "text-red-700"
+                            : "text-slate-600"
+                    }`}
+                  >
+                    {uploadStatus === "uploading" && (
+                      <Loader2 className="h-4 w-4 animate-spin text-slate-500" />
+                    )}
+                    {uploadStatus === "success" && (
+                      <CheckCircle2 className="h-4 w-4 text-green-600" />
+                    )}
+                    {uploadStatus === "skipped" && (
+                      <Info className="h-4 w-4 text-amber-600" />
+                    )}
+                    {uploadStatus === "error" && (
+                      <XCircle className="h-4 w-4 text-red-600" />
+                    )}
+                    <span className="break-words">{uploadMsg}</span>
+                  </div>
+                )}
               </div>
-              {uploadMsg && (
-                <div className="p-3 text-sm text-slate-700">{uploadMsg}</div>
-              )}
 
-              {ingestRes && (
-                <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                  <div className="flex items-center gap-2 mb-3">
-                    <div className="w-2 h-2 rounded-full bg-green-500" />
-                    <Label className="text-slate-700 font-semibold">Ingest Result</Label>
-                  </div>
-                  <div className="bg-slate-50 rounded-lg p-3 overflow-x-auto">
-                    <pre className="text-xs text-slate-700 font-mono whitespace-pre-wrap break-words">
-                      {ingestRes}
-                    </pre>
-                  </div>
+              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm flex flex-col min-h-0 flex-1">
+                <div className="flex items-center justify-between mb-3">
+                  <Label className="text-slate-700 font-semibold">
+                    Uploaded Files
+                  </Label>
+                  <Button
+                    variant="outline"
+                    className="h-8 px-3 text-xs"
+                    onClick={async () => {
+                      const ok = await checkKbHealth();
+                      if (ok) fetchKbFiles();
+                    }}
+                    disabled={kbFilesLoading}
+                  >
+                    {kbFilesLoading ? "Loading..." : "Refresh"}
+                  </Button>
                 </div>
-              )}
-            </ScrollArea>
+
+                {kbHealthError && (
+                  <div className="text-xs text-red-600 mb-2">{kbHealthError}</div>
+                )}
+
+                {kbFilesError && (
+                  <div className="text-xs text-red-600 mb-2">{kbFilesError}</div>
+                )}
+
+                {kbDeleteError && (
+                  <div className="text-xs text-red-600 mb-2">{kbDeleteError}</div>
+                )}
+
+                <ScrollArea className="flex-1 min-h-0">
+                  {!kbFilesError && kbFiles.length === 0 && (
+                    <div className="text-xs text-slate-500">No files yet</div>
+                  )}
+
+                  {kbFiles.length > 0 && (
+                    <div className="space-y-2 w-full">
+                      {kbFiles.map((f) => (
+                        <div
+                          key={f.id ? `id:${f.id}` : `${f.name}-${f.sha256 ?? ""}`}
+                          className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2"
+                        >
+                          <div className="min-w-0 flex-1 overflow-hidden">
+                            <div className="truncate text-sm text-slate-800">
+                              {f.name}
+                            </div>
+                            <div className="text-xs text-slate-500">
+                              {typeof f.chunkCount === "number"
+                                ? `${f.chunkCount} chunks`
+                                : "chunks: -"}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {f.sha256 && (
+                              <Badge
+                                variant={"secondary"}
+                                className="text-[10px] bg-slate-100 text-slate-700"
+                              >
+                                sha256
+                              </Badge>
+                            )}
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                              disabled={
+                                kbDeletingKey ===
+                                  (f.id ||
+                                    `${f.name}::${f.sha256 ?? ""}::legacy`) ||
+                                kbFilesLoading
+                              }
+                              onClick={() => deleteKbFile(f)}
+                              aria-label={`Delete ${f.name}`}
+                              title="Delete"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </ScrollArea>
+              </div>
+            </div>
           </div>
         )}
       </div>

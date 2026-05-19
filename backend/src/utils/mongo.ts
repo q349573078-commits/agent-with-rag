@@ -49,6 +49,25 @@ function extractMongoHostFromUri(uri: string): string | null {
   return hostOnly || null;
 }
 
+export function getMongoConnectionInfo(): {
+  host: string | null;
+  dbName: string;
+  isSrv: boolean;
+  isAtlas: boolean;
+} {
+  const uri = env.MONGODB_ATLAS_URI;
+  const host = extractMongoHostFromUri(uri);
+  const isSrv = uri.startsWith("mongodb+srv://");
+  const isAtlas = uri.includes("mongodb.net");
+
+  return {
+    host,
+    dbName: env.MONGODB_DB_NAME,
+    isSrv,
+    isAtlas,
+  };
+}
+
 function isReservedIpv4ForTesting(ip: string): boolean {
   const parts = ip.split(".");
   if (parts.length !== 4) return false;

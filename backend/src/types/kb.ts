@@ -4,3 +4,11 @@ export interface KBChunk {
   text: string;
   embedding: number[];
 }
+
+export interface KBFileRecord {
+  originalName: string;
+  normalizedName: string;
+  sha256?: string;
+  uploadedAt: Date;
+  chunkCount: number;
+}
