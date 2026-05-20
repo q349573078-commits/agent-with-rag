@@ -1,5 +1,5 @@
 import { Response, Router } from "express";
-import { streamProductAgent } from "../agent/02_agent";
+import { runProductAgentGraph } from "../agent/02_agent";
 import {
   appendToHistory,
   ensureThreadId,
@@ -18,15 +18,30 @@ function writeSseEvent(
 }
 
 agentRouter.post("/chat", async (req, res) => {
-  const { message, threadId: incomingThreadId } = req.body as {
+  const {
+    message,
+    threadId: incomingThreadId,
+    webSearchDecision,
+  } = req.body as {
     message?: string;
     threadId?: string;
+    webSearchDecision?: "confirm" | "cancel";
   };
 
-  if (!message || !message.trim()) {
+  const isResumeRequest =
+    webSearchDecision === "confirm" || webSearchDecision === "cancel";
+
+  if (!isResumeRequest && (!message || !message.trim())) {
     return res.status(400).json({
       ok: false,
       message: "Message is required",
+    });
+  }
+
+  if (isResumeRequest && !incomingThreadId) {
+    return res.status(400).json({
+      ok: false,
+      message: "threadId is required when resuming a pending web search",
     });
   }
 
@@ -66,35 +81,54 @@ agentRouter.post("/chat", async (req, res) => {
 
     writeSseEvent(res, "thread", { threadId });
 
-    const history = await getHistory(threadId);
-    assertNotAborted();
+    let messagesForAgent: { role: "user" | "assistant"; content: string }[] =
+      [];
 
-    const usermsg = {
-      role: "user" as const,
-      content: message.trim(),
-    };
+    if (isResumeRequest) {
+      writeSseEvent(res, "status", {
+        stage:
+          webSearchDecision === "confirm" ? "web_searching" : "cancelling",
+      });
+    } else {
+      const history = await getHistory(threadId);
+      assertNotAborted();
 
-    await appendToHistory(threadId, usermsg);
-    assertNotAborted();
+      const usermsg = {
+        role: "user" as const,
+        content: message!.trim(),
+      };
 
-    writeSseEvent(res, "status", { stage: "searching" });
+      await appendToHistory(threadId, usermsg);
+      assertNotAborted();
 
-    const messagesForAgent = [...history, usermsg];
-    writeSseEvent(res, "status", { stage: "answering" });
-    const { answer, citations } = await streamProductAgent(
-      messagesForAgent,
-      (token) => {
+      messagesForAgent = [...history, usermsg];
+      writeSseEvent(res, "status", { stage: "searching" });
+    }
+
+    const agentResult = await runProductAgentGraph({
+      decision: isResumeRequest ? webSearchDecision : undefined,
+      messages: isResumeRequest ? undefined : messagesForAgent,
+      onToken: (token) => {
         assertNotAborted();
         writeSseEvent(res, "chunk", { content: token });
       },
-      abortController.signal
-    );
+      signal: abortController.signal,
+      threadId,
+    });
 
     assertNotAborted();
 
+    if (agentResult.type === "interrupt") {
+      writeSseEvent(res, "action_required", {
+        threadId,
+        ...agentResult.interrupt,
+      });
+      return res.end();
+    }
+
     const assistantmsg = {
       role: "assistant" as const,
-      content: answer,
+      content: agentResult.answer,
     };
 
     await appendToHistory(threadId, assistantmsg);
@@ -102,8 +136,8 @@ agentRouter.post("/chat", async (req, res) => {
     writeSseEvent(res, "done", {
       ok: true,
       threadId,
-      answer,
-      citations,
+      answer: agentResult.answer,
+      citations: agentResult.citations,
     });
     return res.end();
   } catch (e: any) {

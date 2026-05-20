@@ -5,13 +5,34 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
-import { CheckCircle2, Info, Loader2, Send, Trash2, UploadIcon, XCircle } from "lucide-react";
+import {
+  CheckCircle2,
+  Info,
+  Loader2,
+  Send,
+  Trash2,
+  UploadIcon,
+  XCircle,
+} from "lucide-react";
 import { ChangeEvent, useCallback, useEffect, useState } from "react";
 import { useTypewriter } from "@/hooks/use-typewriter";
 
 type Citation = {
   source: string;
   preview: string;
+  url?: string;
+  type?: "kb" | "web";
+};
+
+type PendingWebSearchAction = {
+  type: "web_search_confirmation";
+  message: string;
+  question: string;
+  reason: "no_retrieval" | "low_confidence";
+  confidence: number | null;
+  confirmLabel: string;
+  cancelLabel: string;
+  status?: "idle" | "searching" | "cancelling";
 };
 
 type StreamDoneEvent = {
@@ -45,6 +66,12 @@ type StreamEvent =
     data: StreamDoneEvent;
   }
   | {
+    event: "action_required";
+    data: PendingWebSearchAction & {
+      threadId: string;
+    };
+  }
+  | {
     event: "error";
     data: {
       message: string;
@@ -52,9 +79,11 @@ type StreamEvent =
   };
 
 type ChatBubble = {
+  id: string;
   role: "user" | "assistant";
   content: string;
   citations?: Citation[];
+  pendingAction?: PendingWebSearchAction | null;
 };
 
 type KbFileListItem = {
@@ -74,6 +103,14 @@ async function sha256Hex(file: File): Promise<string> {
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function createMessageId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function parseSseBlock(block: string): StreamEvent | null {
@@ -328,36 +365,181 @@ export default function Home() {
   }
 
   async function onRun() {
-    if (!input.trim()) return;
+    if (!input.trim() || loading) return;
 
     const userContent = input.trim();
-    const userMsg: ChatBubble = { role: "user", content: userContent };
+    const userMsg: ChatBubble = {
+      id: createMessageId(),
+      role: "user",
+      content: userContent,
+    };
     const assistantMsg: ChatBubble = {
+      id: createMessageId(),
       role: "assistant",
       content: "",
       citations: [],
+      pendingAction: null,
     };
 
-    const updateAssistantMessage = (
-      updater: (message: ChatBubble) => ChatBubble
-    ) => {
-      setThread((currentThread) => {
-        const nextThread = [...currentThread];
+    const updateAssistantMessage = (updater: (message: ChatBubble) => ChatBubble) => {
+      setThread((currentThread) =>
+        currentThread.map((message) =>
+          message.id === assistantMsg.id ? updater(message) : message
+        )
+      );
+    };
 
-        for (let index = nextThread.length - 1; index >= 0; index -= 1) {
-          if (nextThread[index].role === "assistant") {
-            nextThread[index] = updater(nextThread[index]);
-            return nextThread;
+    const streamAgentResponse = async (body: {
+      threadId?: string | null;
+      message?: string;
+      webSearchDecision?: "confirm" | "cancel";
+    }) => {
+      const res = await fetch(`${BASE}/agent/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        throw new Error("Something went wrong");
+      }
+
+      const reader = res.body?.getReader();
+
+      if (!reader) {
+        throw new Error("Streaming response is not available");
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+
+        buffer += decoder.decode(value, { stream: !done });
+
+        const blocks = buffer.split("\n\n");
+        buffer = blocks.pop() ?? "";
+
+        for (const block of blocks) {
+          const parsed = parseSseBlock(block);
+
+          if (!parsed) {
+            continue;
+          }
+
+          if (parsed.event === "thread") {
+            if (parsed.data.threadId) {
+              setThreadId(parsed.data.threadId);
+            }
+            continue;
+          }
+
+          if (parsed.event === "chunk") {
+            updateAssistantMessage((message) => ({
+              ...message,
+              content: message.content + parsed.data.content,
+            }));
+            continue;
+          }
+
+          if (parsed.event === "action_required") {
+            if (parsed.data.threadId) {
+              setThreadId(parsed.data.threadId);
+            }
+
+            updateAssistantMessage((message) => ({
+              ...message,
+              content: parsed.data.message,
+              citations: [],
+              pendingAction: {
+                cancelLabel: parsed.data.cancelLabel,
+                confidence: parsed.data.confidence,
+                confirmLabel: parsed.data.confirmLabel,
+                message: parsed.data.message,
+                question: parsed.data.question,
+                reason: parsed.data.reason,
+                status: "idle",
+                type: parsed.data.type,
+              },
+            }));
+            continue;
+          }
+
+          if (parsed.event === "done") {
+            if (parsed.data.threadId) {
+              setThreadId(parsed.data.threadId);
+            }
+
+            updateAssistantMessage((message) => ({
+              ...message,
+              content: parsed.data.answer || message.content,
+              citations: parsed.data.citations || [],
+              pendingAction: null,
+            }));
+            continue;
+          }
+
+          if (parsed.event === "error") {
+            throw new Error(parsed.data.message || "Something went wrong");
           }
         }
 
-        nextThread.push(updater(assistantMsg));
-        return nextThread;
-      });
+        if (done) {
+          break;
+        }
+      }
     };
 
     setThread((t) => [...t, userMsg, assistantMsg]);
     setInput("");
+    setLoading(true);
+
+    try {
+      await streamAgentResponse({
+        threadId,
+        message: userContent,
+      });
+    } catch (e) {
+      console.log(e);
+      updateAssistantMessage((message) => ({
+        ...message,
+        content: message.content || "Something went wrong",
+        pendingAction: null,
+      }));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function resumePendingWebSearch(
+    assistantMessageId: string,
+    decision: "confirm" | "cancel"
+  ) {
+    if (loading || !threadId) return;
+
+    const updateAssistantMessage = (updater: (message: ChatBubble) => ChatBubble) => {
+      setThread((currentThread) =>
+        currentThread.map((message) =>
+          message.id === assistantMessageId ? updater(message) : message
+        )
+      );
+    };
+
+    updateAssistantMessage((message) => ({
+      ...message,
+      content: "",
+      citations: [],
+      pendingAction: message.pendingAction
+        ? {
+            ...message.pendingAction,
+            status: decision === "confirm" ? "searching" : "cancelling",
+          }
+        : null,
+    }));
+
     setLoading(true);
 
     try {
@@ -368,7 +550,7 @@ export default function Home() {
         },
         body: JSON.stringify({
           threadId,
-          message: userContent,
+          webSearchDecision: decision,
         }),
       });
 
@@ -424,6 +606,7 @@ export default function Home() {
               ...message,
               content: parsed.data.answer || message.content,
               citations: parsed.data.citations || [],
+              pendingAction: null,
             }));
             continue;
           }
@@ -441,12 +624,14 @@ export default function Home() {
       console.log(e);
       updateAssistantMessage((message) => ({
         ...message,
-        content: message.content || "Something went wrong",
+        content: "Something went wrong",
+        pendingAction: null,
       }));
     } finally {
       setLoading(false);
     }
   }
+
   return (
     <div className="h-screen flex flex-col bg-linear-to-b from-slate-50 to-slate-100">
       <div className="border-b border-slate-200 bg-white shadow-sm">
@@ -495,10 +680,13 @@ export default function Home() {
 
               {thread.map((m, i) => (
                 <ChatRow 
-                  key={i} 
+                  key={m.id} 
                   msg={m} 
                   isLoading={loading && i === thread.length - 1} 
                   isLastAssistantMessage={i === thread.length - 1 && m.role === "assistant"}
+                  onConfirmWebSearch={() => resumePendingWebSearch(m.id, "confirm")}
+                  onCancelWebSearch={() => resumePendingWebSearch(m.id, "cancel")}
+                  interactionDisabled={loading}
                 />
               ))}
             </div>
@@ -510,11 +698,13 @@ export default function Home() {
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
                 placeholder="Ask anything about your uploaded docs..."
+                disabled={loading}
                 className="resize-none min-h-[100px] rounded-xl border-slate-400 bg-slate-50"
               />
               <div className="flex items-center justify-end">
                 <Button
                   onClick={onRun}
+                  disabled={loading}
                   className="gap-2 rounded-lg bg-linear-to-br from-blue-500 to-purple-600 text-white"
                 >
                   {loading ? "Thinking..." : "Send"}
@@ -687,10 +877,27 @@ export default function Home() {
   );
 }
 
-function ChatRow({ msg, isLoading, isLastAssistantMessage }: { msg: ChatBubble; isLoading?: boolean; isLastAssistantMessage?: boolean }) {
+function ChatRow({
+  msg,
+  isLoading,
+  isLastAssistantMessage,
+  onConfirmWebSearch,
+  onCancelWebSearch,
+  interactionDisabled,
+}: {
+  msg: ChatBubble;
+  isLoading?: boolean;
+  isLastAssistantMessage?: boolean;
+  onConfirmWebSearch?: () => void;
+  onCancelWebSearch?: () => void;
+  interactionDisabled?: boolean;
+}) {
   const isUser = msg.role === "user";
   const { displayText: typewriterText } = useTypewriter(msg.content, 10, !!isLastAssistantMessage);
   const displayContent = isLastAssistantMessage ? typewriterText : msg.content;
+  const pendingStatus = msg.pendingAction?.status ?? "idle";
+  const isSearchingWeb = pendingStatus === "searching";
+  const isCancellingWebSearch = pendingStatus === "cancelling";
 
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
@@ -723,14 +930,119 @@ function ChatRow({ msg, isLoading, isLastAssistantMessage }: { msg: ChatBubble; 
           {!isUser && msg.citations && msg.citations.length > 0 && (
             <div className="mt-3 flex flex-col gap-2">
               {msg.citations.map((c, i) => (
-                <Badge
-                  key={i}
-                  variant={"secondary"}
-                  className="text-xs bg-slate-100 text-slate-700"
-                >
-                  {c.source}
-                </Badge>
+                c.url ? (
+                  <a
+                    key={i}
+                    href={c.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex"
+                  >
+                    <Badge
+                      variant={"secondary"}
+                      className="text-xs bg-slate-100 text-slate-700 hover:bg-slate-200"
+                    >
+                      {c.source}
+                    </Badge>
+                  </a>
+                ) : (
+                  <Badge
+                    key={i}
+                    variant={"secondary"}
+                    className="text-xs bg-slate-100 text-slate-700"
+                  >
+                    {c.source}
+                  </Badge>
+                )
               ))}
+            </div>
+          )}
+
+          {!isUser && msg.pendingAction && (
+            <div className="mt-4 overflow-hidden rounded-xl border border-blue-200 bg-white shadow-sm">
+              <div className="bg-linear-to-r from-blue-50 to-purple-50 px-4 py-3">
+                <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                  {isSearchingWeb || isCancellingWebSearch ? (
+                    <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+                  ) : (
+                    <Info className="h-4 w-4 text-blue-600" />
+                  )}
+                  <span>
+                    {isSearchingWeb
+                      ? "正在联网搜索..."
+                      : isCancellingWebSearch
+                        ? "正在取消联网搜索..."
+                        : "需要你的确认"}
+                  </span>
+                </div>
+                <div className="mt-1 text-xs text-slate-600">
+                  {isSearchingWeb
+                    ? "已开始联网检索公开网页内容，马上继续生成答案。"
+                    : isCancellingWebSearch
+                      ? "正在结束本次联网搜索请求。"
+                      : "当前知识库结果不足，是否切换到互联网搜索结果继续回答。"}
+                </div>
+              </div>
+
+              <div className="space-y-3 px-4 py-4">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-700">
+                  {msg.pendingAction.message}
+                </div>
+
+                <div className="space-y-1 text-xs text-slate-600">
+                  <div>
+                    {msg.pendingAction.reason === "no_retrieval"
+                      ? "当前知识库没有检索到可回答的内容。"
+                      : "当前知识库结果置信度偏低。"}
+                  </div>
+                  {msg.pendingAction.reason === "low_confidence" &&
+                    typeof msg.pendingAction.confidence === "number" && (
+                    <div>检索置信度：{msg.pendingAction.confidence.toFixed(3)}</div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <Button
+                    size="sm"
+                    onClick={onConfirmWebSearch}
+                    disabled={interactionDisabled || isSearchingWeb || isCancellingWebSearch}
+                    className="h-10 bg-linear-to-br from-blue-500 to-purple-600 text-white shadow-sm hover:from-blue-600 hover:to-purple-700"
+                  >
+                    {isSearchingWeb ? (
+                      <span className="flex items-center gap-2">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        正在联网搜索
+                      </span>
+                    ) : (
+                      msg.pendingAction.confirmLabel
+                    )}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={onCancelWebSearch}
+                    disabled={interactionDisabled || isSearchingWeb || isCancellingWebSearch}
+                    className="h-10 border-slate-300 bg-white"
+                  >
+                    {isCancellingWebSearch ? (
+                      <span className="flex items-center gap-2">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        正在取消
+                      </span>
+                    ) : (
+                      msg.pendingAction.cancelLabel
+                    )}
+                  </Button>
+                </div>
+
+                {(isSearchingWeb || isCancellingWebSearch) && (
+                  <div className="text-xs text-slate-500">
+                    {isSearchingWeb
+                      ? "正在调用互联网搜索并整理结果，请稍等。"
+                      : "正在返回取消状态，请稍等。"}
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>

@@ -1,5 +1,6 @@
 import { Document } from "@langchain/core/documents";
 import { embeddings } from "../utils/openai";
+import { env } from "../utils/env";
 import { getKbCollection } from "./03_vectorStore";
 
 export interface RetrieverResult {
@@ -112,9 +113,20 @@ export async function retrieveRelevantChunks(
     };
   }
 
-  const docs = results.map(([doc]) => doc);
   const scores = results.map(([_, score]) => score);
   const confidence = scoreToConfidence(scores);
+  const relevantResults = results.filter(
+    ([_, score]) => score >= env.RETRIEVAL_MIN_SCORE
+  );
+
+  if (!relevantResults.length) {
+    return {
+      docs: [],
+      confidence,
+    };
+  }
+
+  const docs = relevantResults.map(([doc]) => doc);
 
   return { docs, confidence };
 }

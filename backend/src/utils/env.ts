@@ -7,6 +7,7 @@ const EnvSchema = z.object({
     .default("5000")
     .transform((val) => Number(val)),
   OPENAI_API_KEY: z.string().min(1, "OPENAI_API_KEY is required"),
+  TAVILY_API_KEY: z.string().optional(),
   MONGODB_ATLAS_URI: z.string().min(1, "MONGODB_ATLAS_URI is required"),
   MONGODB_DB_NAME: z.string().min(1, "MONGODB_DB_NAME is required"),
   RERANK_ENABLED: z
@@ -24,6 +25,16 @@ const EnvSchema = z.object({
     .default("4")
     .transform((val) => Number(val))
     .pipe(z.number().int().min(1).max(10)),
+  RETRIEVAL_MIN_SCORE: z
+    .string()
+    .default("0.5")
+    .transform((val) => Number(val))
+    .pipe(z.number().min(0).max(1)),
+  RETRIEVAL_LOW_CONFIDENCE_THRESHOLD: z
+    .string()
+    .default("0.6")
+    .transform((val) => Number(val))
+    .pipe(z.number().min(0).max(1)),
 });
 
 const parsed = EnvSchema.safeParse(process.env);
