@@ -42,9 +42,12 @@ agentRouter.post("/chat", async (req, res) => {
     abortController.abort();
   };
 
-  req.on("close", handleClientDisconnect);
   req.on("aborted", handleClientDisconnect);
-  res.on("close", handleClientDisconnect);
+  res.on("close", () => {
+    if (!res.writableEnded) {
+      handleClientDisconnect();
+    }
+  });
 
   const assertNotAborted = () => {
     if (abortController.signal.aborted) {
@@ -105,6 +108,9 @@ agentRouter.post("/chat", async (req, res) => {
     return res.end();
   } catch (e: any) {
     if (abortController.signal.aborted) {
+      if (!res.writableEnded) {
+        res.end();
+      }
       return;
     }
 
@@ -115,8 +121,6 @@ agentRouter.post("/chat", async (req, res) => {
     });
     return res.end();
   } finally {
-    req.off("close", handleClientDisconnect);
     req.off("aborted", handleClientDisconnect);
-    res.off("close", handleClientDisconnect);
   }
 });
