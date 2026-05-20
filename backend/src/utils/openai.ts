@@ -13,6 +13,12 @@ export const rerankModel = new ChatOpenAI({
   openAIApiKey: env.OPENAI_API_KEY,
 });
 
+export const reflectionModel = new ChatOpenAI({
+  model: "gpt-4o-mini",
+  temperature: 0,
+  openAIApiKey: env.OPENAI_API_KEY,
+});
+
 export const embeddings = new OpenAIEmbeddings({
   model: "text-embedding-3-small",
   openAIApiKey: env.OPENAI_API_KEY,

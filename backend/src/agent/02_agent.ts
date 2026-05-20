@@ -10,7 +10,7 @@ import {
   StateGraph,
 } from "@langchain/langgraph";
 import { TavilySearch } from "@langchain/tavily";
-import { chatModel, rerankModel } from "../utils/openai";
+import { chatModel, reflectionModel, rerankModel } from "../utils/openai";
 import { AGENT_SYSTEM_PROMPT } from "./01_policy";
 import { retrieveRelevantChunks } from "../kb/05_retriever";
 import { env } from "../utils/env";
@@ -275,7 +275,7 @@ async function buildQueryPlan(args: {
   ];
 
   try {
-    const result = await rerankModel.invoke(prompt, {
+    const result = await reflectionModel.invoke(prompt, {
       signal,
       response_format: { type: "json_object" },
     });
