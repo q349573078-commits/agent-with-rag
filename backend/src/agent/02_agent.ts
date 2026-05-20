@@ -1,6 +1,9 @@
-import { chatModel } from "../utils/openai";
+import { Document } from "@langchain/core/documents";
+import { z } from "zod";
+import { chatModel, rerankModel } from "../utils/openai";
 import { AGENT_SYSTEM_PROMPT } from "./01_policy";
 import { retrieveRelevantChunks } from "../kb/05_retriever";
+import { env } from "../utils/env";
 
 export interface AgentCitation {
   source: string;
@@ -80,7 +83,97 @@ function extractChunkText(content: unknown): string {
     .join("");
 }
 
-async function buildAnswerPlan(messages: { role: string; content: string }[]) {
+function truncateForRerank(text: string, maxChars: number): string {
+  const normalized = text.trim();
+  if (normalized.length <= maxChars) return normalized;
+  return normalized.slice(0, maxChars) + "...";
+}
+
+const RerankResponseSchema = z.object({
+  order: z.array(z.number().int().nonnegative()).default([]),
+});
+
+async function rerankDocsWithLLM(args: {
+  query: string;
+  docs: Document[];
+  topK: number;
+  signal?: AbortSignal;
+}): Promise<Document[]> {
+  const { query, docs, topK, signal } = args;
+
+  if (docs.length <= 1) {
+    return docs.slice(0, topK);
+  }
+
+  const candidates = docs.map((doc, index) => {
+    return {
+      id: index,
+      text: truncateForRerank(doc.pageContent, 900),
+    };
+  });
+
+  const prompt = [
+    {
+      role: "system" as const,
+      content:
+        "你是一个 rerank 模型。给定用户问题与候选段落，选择最有助于回答该问题的段落，并按相关性从高到低排序。必须返回 JSON 格式，包含一个 `order` 字段，其值为候选段落的 id 数组。",
+    },
+    {
+      role: "user" as const,
+      content: JSON.stringify(
+        {
+          query,
+          topK,
+          candidates,
+        },
+        null,
+        2
+      ),
+    },
+  ];
+
+  try {
+    const result = await rerankModel.invoke(prompt, {
+      signal,
+      response_format: { type: "json_object" },
+    });
+    const text = extractChunkText(result.content);
+    const parsedJson = JSON.parse(text);
+    const parsed = RerankResponseSchema.safeParse(parsedJson);
+
+    if (!parsed.success) {
+      console.error("Rerank Zod parse error:", parsed.error);
+      return docs.slice(0, topK);
+    }
+
+    const seen = new Set<number>();
+    const picked: Document[] = [];
+
+    for (const id of parsed.data.order) {
+      if (picked.length >= topK) break;
+      if (id < 0 || id >= docs.length) continue;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      picked.push(docs[id]);
+    }
+
+    for (let i = 0; i < docs.length && picked.length < topK; i++) {
+      if (seen.has(i)) continue;
+      seen.add(i);
+      picked.push(docs[i]);
+    }
+
+    return picked;
+  } catch (err) {
+    console.error("Rerank failed:", err);
+    return docs.slice(0, topK);
+  }
+}
+
+async function buildAnswerPlan(
+  messages: { role: string; content: string }[],
+  signal?: AbortSignal
+) {
   const latestUserMessage = [...messages]
     .reverse()
     .find((message) => message.role === "user" && message.content.trim());
@@ -93,12 +186,31 @@ async function buildAnswerPlan(messages: { role: string; content: string }[]) {
     };
   }
 
-  const { docs, confidence } = await retrieveRelevantChunks(
+  const topK = env.RERANK_TOP_K;
+  const candidateK = env.RERANK_ENABLED
+    ? Math.max(env.RERANK_CANDIDATES, topK)
+    : topK;
+
+  const { docs: retrievedDocs, confidence } = await retrieveRelevantChunks(
     latestUserMessage.content,
-    4
+    candidateK
   );
+
+  const shouldFallback = retrievedDocs.length === 0 || confidence < 0.2;
+
+  let docs: Document[] = [];
+  if (!shouldFallback) {
+    docs = env.RERANK_ENABLED
+      ? await rerankDocsWithLLM({
+          query: latestUserMessage.content,
+          docs: retrievedDocs,
+          topK,
+          signal,
+        })
+      : retrievedDocs.slice(0, topK);
+  }
+
   const citations = buildCitations(docs);
-  const shouldFallback = docs.length === 0 || confidence < 0.2;
 
   return {
     citations,
@@ -119,7 +231,10 @@ export async function streamProductAgent(
   };
 
   assertNotAborted();
-  const { citations, docs, shouldFallback } = await buildAnswerPlan(messages);
+  const { citations, docs, shouldFallback } = await buildAnswerPlan(
+    messages,
+    signal
+  );
   const fallback = "根据现有文档，我无法回答。";
 
   if (shouldFallback) {
