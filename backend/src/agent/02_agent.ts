@@ -22,6 +22,24 @@ type SerializableDoc = {
 
 type WebSearchDecision = "confirm" | "cancel";
 type RetrievalFallbackReason = "no_retrieval" | "low_confidence";
+type AnswerSource = "kb" | "web" | "none";
+type ReflectionAction = "accept" | "rewrite" | "ask_web_search";
+type AgentStage =
+  | "planning"
+  | "retrieving"
+  | "reranking"
+  | "answering"
+  | "web_searching"
+  | "reflecting";
+
+type QueryPlan = {
+  intent: string;
+  needsKbRetrieval: boolean;
+  needsWebSearch: boolean;
+  searchQuery: string;
+  answerStyle: "concise" | "detailed" | "step_by_step";
+  riskLevel: "low" | "medium" | "high";
+};
 
 type WebSearchResult = {
   title: string;
@@ -67,6 +85,15 @@ const WEB_SEARCH_CONFIG_MISSING_ANSWER =
   "已确认联网搜索，但服务端尚未配置 `TAVILY_API_KEY`，暂时无法执行互联网检索。";
 
 const graphCheckpointer = new MemorySaver();
+
+const DEFAULT_QUERY_PLAN: QueryPlan = {
+  intent: "answer_question",
+  needsKbRetrieval: true,
+  needsWebSearch: false,
+  searchQuery: "",
+  answerStyle: "concise",
+  riskLevel: "low",
+};
 
 function buildKbCitations(docs: SerializableDoc[]): AgentCitation[] {
   const sourceMap = new Map<string, string>();
@@ -180,6 +207,97 @@ const RerankResponseSchema = z.object({
   order: z.array(z.number().int().nonnegative()).default([]),
 });
 
+const QueryPlanSchema = z.object({
+  intent: z.string().trim().min(1).default(DEFAULT_QUERY_PLAN.intent),
+  needsKbRetrieval: z.boolean().default(DEFAULT_QUERY_PLAN.needsKbRetrieval),
+  needsWebSearch: z.boolean().default(DEFAULT_QUERY_PLAN.needsWebSearch),
+  searchQuery: z.string().trim().default(""),
+  answerStyle: z
+    .enum(["concise", "detailed", "step_by_step"])
+    .default(DEFAULT_QUERY_PLAN.answerStyle),
+  riskLevel: z.enum(["low", "medium", "high"]).default(DEFAULT_QUERY_PLAN.riskLevel),
+});
+
+const ReflectionResponseSchema = z.object({
+  action: z.enum(["accept", "rewrite", "ask_web_search"]).default("accept"),
+  answer: z.string().trim().optional(),
+  reason: z.string().trim().optional(),
+});
+
+function getLatestUserMessage(messages: { role: string; content: string }[]) {
+  return [...messages]
+    .reverse()
+    .find((message) => message.role === "user" && message.content.trim());
+}
+
+async function buildQueryPlan(args: {
+  messages: { role: string; content: string }[];
+  signal?: AbortSignal;
+}): Promise<QueryPlan> {
+  const { messages, signal } = args;
+  const latestUserMessage = getLatestUserMessage(messages);
+
+  if (!latestUserMessage) {
+    return DEFAULT_QUERY_PLAN;
+  }
+
+  const fallbackPlan: QueryPlan = {
+    ...DEFAULT_QUERY_PLAN,
+    searchQuery: latestUserMessage.content.trim(),
+  };
+
+  const prompt = [
+    {
+      role: "system" as const,
+      content:
+        "你是 RAG 问答系统的计划器。根据对话历史生成执行计划，只返回 JSON，不要回答用户问题。",
+    },
+    {
+      role: "user" as const,
+      content: JSON.stringify(
+        {
+          task:
+            "判断这个问题应该如何检索和回答。searchQuery 必须是适合向量检索的完整独立问题；如果最后一句依赖上下文，请结合历史改写。needsWebSearch 表示该问题可能需要知识库外的最新、公开或实时信息，但仍需用户确认后才能联网。",
+          outputShape: {
+            intent: "string",
+            needsKbRetrieval: "boolean",
+            needsWebSearch: "boolean",
+            searchQuery: "string",
+            answerStyle: "concise | detailed | step_by_step",
+            riskLevel: "low | medium | high",
+          },
+          conversation: messages,
+        },
+        null,
+        2
+      ),
+    },
+  ];
+
+  try {
+    const result = await rerankModel.invoke(prompt, {
+      signal,
+      response_format: { type: "json_object" },
+    });
+    const text = extractChunkText(result.content);
+    const parsedJson = JSON.parse(text);
+    const parsed = QueryPlanSchema.safeParse(parsedJson);
+
+    if (!parsed.success) {
+      console.error("Query plan Zod parse error:", parsed.error);
+      return fallbackPlan;
+    }
+
+    return {
+      ...parsed.data,
+      searchQuery: parsed.data.searchQuery || latestUserMessage.content.trim(),
+    };
+  } catch (err) {
+    console.error("Query plan failed:", err);
+    return fallbackPlan;
+  }
+}
+
 async function rerankDocsWithLLM(args: {
   query: string;
   docs: SerializableDoc[];
@@ -259,11 +377,11 @@ async function rerankDocsWithLLM(args: {
 
 async function buildRetrievalPlan(
   messages: { role: string; content: string }[],
+  queryPlan: QueryPlan,
+  onStage?: (stage: AgentStage) => void | Promise<void>,
   signal?: AbortSignal
 ) {
-  const latestUserMessage = [...messages]
-    .reverse()
-    .find((message) => message.role === "user" && message.content.trim());
+  const latestUserMessage = getLatestUserMessage(messages);
 
   if (!latestUserMessage) {
     return {
@@ -276,13 +394,27 @@ async function buildRetrievalPlan(
     };
   }
 
+  const question = latestUserMessage.content.trim();
+  const searchQuery = queryPlan.searchQuery.trim() || question;
+
+  if (!queryPlan.needsKbRetrieval) {
+    return {
+      citations: [] as AgentCitation[],
+      confidence: 0,
+      docs: [] as SerializableDoc[],
+      fallbackReason: "no_retrieval" as RetrievalFallbackReason,
+      question,
+      shouldAskWebSearch: queryPlan.needsWebSearch,
+    };
+  }
+
   const topK = env.RERANK_TOP_K;
   const candidateK = env.RERANK_ENABLED
     ? Math.max(env.RERANK_CANDIDATES, topK)
     : topK;
 
   const { docs: retrievedDocs, confidence } = await retrieveRelevantChunks(
-    latestUserMessage.content,
+    searchQuery,
     candidateK
   );
 
@@ -295,9 +427,13 @@ async function buildRetrievalPlan(
 
   let docs: SerializableDoc[] = [];
   if (!fallbackReason) {
+    if (env.RERANK_ENABLED) {
+      await onStage?.("reranking");
+    }
+
     docs = env.RERANK_ENABLED
       ? await rerankDocsWithLLM({
-          query: latestUserMessage.content,
+          query: searchQuery,
           docs: retrievedDocs.map((doc) => ({
             pageContent: doc.pageContent,
             metadata: doc.metadata,
@@ -315,9 +451,11 @@ async function buildRetrievalPlan(
     citations: buildKbCitations(docs),
     confidence,
     docs,
-    fallbackReason,
-    question: latestUserMessage.content,
-    shouldAskWebSearch: !!fallbackReason,
+    fallbackReason: queryPlan.needsWebSearch
+      ? ("low_confidence" as RetrievalFallbackReason)
+      : fallbackReason,
+    question,
+    shouldAskWebSearch: queryPlan.needsWebSearch || !!fallbackReason,
   };
 }
 
@@ -373,6 +511,122 @@ async function generateAnswerFromContext(args: {
   }
 
   return answer.trim();
+}
+
+async function reflectAnswer(args: {
+  answer: string;
+  answerSource: AnswerSource;
+  docs: SerializableDoc[];
+  messages: { role: string; content: string }[];
+  queryPlan: QueryPlan;
+  webResults: WebSearchResult[];
+  signal?: AbortSignal;
+}): Promise<{
+  action: ReflectionAction;
+  answer?: string;
+  reason?: string;
+}> {
+  const { answer, answerSource, docs, messages, queryPlan, webResults, signal } =
+    args;
+
+  if (
+    !answer.trim() ||
+    answer === FALLBACK_ANSWER ||
+    answer === WEB_SEARCH_CANCELLED_ANSWER ||
+    answer === WEB_SEARCH_EMPTY_ANSWER ||
+    answer === WEB_SEARCH_CONFIG_MISSING_ANSWER
+  ) {
+    return {
+      action: "accept",
+    };
+  }
+
+  const contextText =
+    answerSource === "web" ? formatWebContext(webResults) : formatKbContext(docs);
+
+  if (!contextText.trim()) {
+    return {
+      action: "rewrite",
+      answer:
+        answerSource === "web" ? WEB_SEARCH_EMPTY_ANSWER : FALLBACK_ANSWER,
+      reason: "No supporting context was available.",
+    };
+  }
+
+  const prompt = [
+    {
+      role: "system" as const,
+      content:
+        "你是 RAG 答案审查器。检查答案是否严格由给定上下文支持，并只返回 JSON。",
+    },
+    {
+      role: "user" as const,
+      content: JSON.stringify(
+        {
+          task:
+            "判断 assistantAnswer 是否回答了 latestUserQuestion，且是否完全受到 suppliedContext 支持。若答案包含上下文外断言或答非所问，返回 rewrite 并给出更保守的 answer。若知识库答案明显需要知识库外信息才能可靠回答，可返回 ask_web_search。不要添加上下文没有的信息。",
+          allowedActions:
+            answerSource === "kb"
+              ? ["accept", "rewrite", "ask_web_search"]
+              : ["accept", "rewrite"],
+          outputShape: {
+            action: "accept | rewrite | ask_web_search",
+            answer: "string, required only when action is rewrite",
+            reason: "string",
+          },
+          answerSource,
+          queryPlan,
+          conversation: messages,
+          latestUserQuestion: getLatestUserMessage(messages)?.content ?? "",
+          suppliedContext: contextText,
+          assistantAnswer: answer,
+        },
+        null,
+        2
+      ),
+    },
+  ];
+
+  try {
+    const result = await rerankModel.invoke(prompt, {
+      signal,
+      response_format: { type: "json_object" },
+    });
+    const text = extractChunkText(result.content);
+    const parsedJson = JSON.parse(text);
+    const parsed = ReflectionResponseSchema.safeParse(parsedJson);
+
+    if (!parsed.success) {
+      console.error("Reflection Zod parse error:", parsed.error);
+      return {
+        action: "accept",
+      };
+    }
+
+    const action =
+      answerSource === "web" && parsed.data.action === "ask_web_search"
+        ? "rewrite"
+        : parsed.data.action;
+
+    if (action === "rewrite" && !parsed.data.answer) {
+      return {
+        action: "rewrite",
+        answer: answerSource === "web" ? WEB_SEARCH_EMPTY_ANSWER : FALLBACK_ANSWER,
+        reason: parsed.data.reason,
+      };
+    }
+
+    return {
+      action,
+      answer: parsed.data.answer,
+      reason: parsed.data.reason,
+    };
+  } catch (err) {
+    console.error("Reflection failed:", err);
+    return {
+      action: "accept",
+    };
+  }
 }
 
 async function searchWeb(question: string, signal?: AbortSignal) {
@@ -434,12 +688,15 @@ async function searchWeb(question: string, signal?: AbortSignal) {
 
 const ProductAgentState = Annotation.Root({
   answer: Annotation<string>(),
+  answerSource: Annotation<AnswerSource>(),
   citations: Annotation<AgentCitation[]>(),
   confidence: Annotation<number | null>(),
   docs: Annotation<SerializableDoc[]>(),
   fallbackReason: Annotation<RetrievalFallbackReason | null>(),
   messages: Annotation<{ role: string; content: string }[]>(),
   question: Annotation<string>(),
+  queryPlan: Annotation<QueryPlan>(),
+  reflectionAction: Annotation<ReflectionAction>(),
   shouldAskWebSearch: Annotation<boolean>(),
   webResults: Annotation<WebSearchResult[]>(),
   webSearchDecision: Annotation<WebSearchDecision | null>(),
@@ -447,21 +704,42 @@ const ProductAgentState = Annotation.Root({
 });
 
 function createProductAgentGraph(args: {
+  onStage?: (stage: AgentStage) => void | Promise<void>;
   onToken?: (token: string) => void | Promise<void>;
   signal?: AbortSignal;
 }) {
-  const { onToken, signal } = args;
+  const { onStage, onToken, signal } = args;
 
   return new StateGraph(ProductAgentState)
+    .addNode("plan_query", async (state) => {
+      assertNotAborted(signal);
+      await onStage?.("planning");
+      const queryPlan = await buildQueryPlan({
+        messages: state.messages,
+        signal,
+      });
+
+      return {
+        queryPlan,
+      };
+    })
     .addNode("retrieve", async (state) => {
       assertNotAborted(signal);
-      const plan = await buildRetrievalPlan(state.messages, signal);
+      await onStage?.("retrieving");
+      const plan = await buildRetrievalPlan(
+        state.messages,
+        state.queryPlan || DEFAULT_QUERY_PLAN,
+        onStage,
+        signal
+      );
       return {
+        answerSource: "none" as AnswerSource,
         citations: plan.citations,
         confidence: plan.confidence,
         docs: plan.docs,
         fallbackReason: plan.fallbackReason,
         question: plan.question,
+        reflectionAction: "accept" as ReflectionAction,
         shouldAskWebSearch: plan.shouldAskWebSearch,
         webResults: [],
         webSearchDecision: null,
@@ -470,7 +748,9 @@ function createProductAgentGraph(args: {
     })
     .addNode("ask_web_search_confirmation", (state) => {
       const reasonMessage =
-        state.fallbackReason === "no_retrieval"
+        state.queryPlan?.needsWebSearch
+          ? "这个问题可能需要知识库之外的最新或公开信息。"
+          : state.fallbackReason === "no_retrieval"
           ? "知识库中没有检索到可用于回答当前问题的内容。"
           : "知识库检索到了内容，但当前结果置信度偏低。";
 
@@ -495,13 +775,19 @@ function createProductAgentGraph(args: {
       if (!state.question || state.docs.length === 0) {
         return {
           answer: FALLBACK_ANSWER,
+          answerSource: "none" as AnswerSource,
           citations: [],
         };
       }
 
+      await onStage?.("answering");
       const answer =
         (await generateAnswerFromContext({
-          answerInstruction: "请只基于这些知识库文档回答最后一个用户问题。",
+          answerInstruction: [
+            "请只基于这些知识库文档回答最后一个用户问题。",
+            `回答风格：${state.queryPlan?.answerStyle ?? "concise"}。`,
+            `风险等级：${state.queryPlan?.riskLevel ?? "low"}；风险越高，越要保守，不确定时直接说明当前上下文不足。`,
+          ].join("\n"),
           contextLabel: "知识库文档上下文",
           contextText: formatKbContext(state.docs),
           messages: state.messages,
@@ -511,10 +797,12 @@ function createProductAgentGraph(args: {
 
       return {
         answer,
+        answerSource: "kb" as AnswerSource,
         citations: state.citations,
       };
     })
     .addNode("search_web", async (state) => {
+      await onStage?.("web_searching");
       const result = await searchWeb(state.question, signal);
       return {
         citations: result.citations,
@@ -526,6 +814,7 @@ function createProductAgentGraph(args: {
       if (state.webSearchError) {
         return {
           answer: state.webSearchError,
+          answerSource: "none" as AnswerSource,
           citations: [],
         };
       }
@@ -533,10 +822,12 @@ function createProductAgentGraph(args: {
       if (state.webResults.length === 0) {
         return {
           answer: WEB_SEARCH_EMPTY_ANSWER,
+          answerSource: "none" as AnswerSource,
           citations: [],
         };
       }
 
+      await onStage?.("answering");
       const answer =
         (await generateAnswerFromContext({
           answerInstruction:
@@ -550,16 +841,55 @@ function createProductAgentGraph(args: {
 
       return {
         answer,
+        answerSource: "web" as AnswerSource,
         citations: state.citations,
+      };
+    })
+    .addNode("reflect_answer", async (state) => {
+      assertNotAborted(signal);
+      await onStage?.("reflecting");
+      const reflection = await reflectAnswer({
+        answer: state.answer,
+        answerSource: state.answerSource || "none",
+        docs: state.docs,
+        messages: state.messages,
+        queryPlan: state.queryPlan || DEFAULT_QUERY_PLAN,
+        webResults: state.webResults,
+        signal,
+      });
+
+      if (reflection.action === "ask_web_search") {
+        return {
+          fallbackReason: "low_confidence" as RetrievalFallbackReason,
+          reflectionAction: reflection.action,
+          shouldAskWebSearch: true,
+        };
+      }
+
+      if (reflection.action === "rewrite") {
+        return {
+          answer:
+            reflection.answer ||
+            (state.answerSource === "web" ? WEB_SEARCH_EMPTY_ANSWER : FALLBACK_ANSWER),
+          citations: [],
+          reflectionAction: reflection.action,
+          shouldAskWebSearch: false,
+        };
+      }
+
+      return {
+        reflectionAction: reflection.action,
       };
     })
     .addNode("cancel_web_search", () => {
       return {
         answer: WEB_SEARCH_CANCELLED_ANSWER,
+        answerSource: "none" as AnswerSource,
         citations: [],
       };
     })
-    .addEdge(START, "retrieve")
+    .addEdge(START, "plan_query")
+    .addEdge("plan_query", "retrieve")
     .addConditionalEdges("retrieve", (state) => {
       return state.shouldAskWebSearch
         ? "ask_web_search_confirmation"
@@ -570,9 +900,14 @@ function createProductAgentGraph(args: {
         ? "search_web"
         : "cancel_web_search";
     })
-    .addEdge("answer_from_kb", END)
+    .addEdge("answer_from_kb", "reflect_answer")
+    .addConditionalEdges("reflect_answer", (state) => {
+      return state.reflectionAction === "ask_web_search"
+        ? "ask_web_search_confirmation"
+        : END;
+    })
     .addEdge("search_web", "answer_from_web")
-    .addEdge("answer_from_web", END)
+    .addEdge("answer_from_web", "reflect_answer")
     .addEdge("cancel_web_search", END)
     .compile({
       checkpointer: graphCheckpointer,
@@ -583,11 +918,12 @@ export async function runProductAgentGraph(args: {
   messages?: { role: string; content: string }[];
   threadId: string;
   decision?: WebSearchDecision;
+  onStage?: (stage: AgentStage) => void | Promise<void>;
   onToken?: (token: string) => void | Promise<void>;
   signal?: AbortSignal;
 }): Promise<AgentGraphResult> {
-  const { decision, messages = [], onToken, signal, threadId } = args;
-  const graph = createProductAgentGraph({ onToken, signal });
+  const { decision, messages = [], onStage, onToken, signal, threadId } = args;
+  const graph = createProductAgentGraph({ onStage, onToken, signal });
   const config = {
     configurable: {
       thread_id: threadId,

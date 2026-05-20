@@ -108,6 +108,10 @@ agentRouter.post("/chat", async (req, res) => {
     const agentResult = await runProductAgentGraph({
       decision: isResumeRequest ? webSearchDecision : undefined,
       messages: isResumeRequest ? undefined : messagesForAgent,
+      onStage: (stage) => {
+        assertNotAborted();
+        writeSseEvent(res, "status", { stage });
+      },
       onToken: (token) => {
         assertNotAborted();
         writeSseEvent(res, "chunk", { content: token });
