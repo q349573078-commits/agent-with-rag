@@ -2,10 +2,10 @@ import { MongoDBAtlasVectorSearch } from "@langchain/mongodb";
 import { Collection as MongoCollection } from "mongodb";
 import { getDb } from "../utils/mongo";
 import { embeddings } from "../utils/openai";
+import { env } from "../utils/env";
 
 const KB_COLLECTION_NAME = "kb_chunks";
 const KB_FILES_COLLECTION_NAME = "kb_files";
-const KB_INDEX_NAME = "kb_vector_index";
 
 let collectionPromise: Promise<MongoCollection> | null = null;
 let filesCollectionPromise: Promise<MongoCollection> | null = null;
@@ -60,7 +60,7 @@ export async function getVectorStore(): Promise<MongoDBAtlasVectorSearch> {
 
       const vectorStore = new MongoDBAtlasVectorSearch(embeddings, {
         collection: collection as any,
-        indexName: KB_INDEX_NAME,
+        indexName: env.KB_VECTOR_INDEX_NAME,
         textKey: "text",
         embeddingKey: "embedding",
       });
