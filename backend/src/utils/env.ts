@@ -35,6 +35,15 @@ const EnvSchema = z.object({
     .default("0.6")
     .transform((val) => Number(val))
     .pipe(z.number().min(0).max(1)),
+  RETRIEVAL_BACKEND: z
+    .enum(["atlas_vector", "app_cosine"])
+    .default("atlas_vector"),
+  KB_VECTOR_INDEX_NAME: z.string().default("kb_vector_index"),
+  VECTOR_SEARCH_NUM_CANDIDATES: z
+    .string()
+    .default("100")
+    .transform((val) => Number(val))
+    .pipe(z.number().int().min(1)),
 });
 
 const parsed = EnvSchema.safeParse(process.env);
