@@ -1,37 +1,47 @@
 # Agent with RAG
 
-基于 **LangChain + LangGraph + MongoDB Atlas + Next.js** 的全栈 RAG 问答系统。支持上传私有文档建立知识库，通过检索增强生成（RAG）进行智能问答，并在知识库不足或问题需要公开实时信息时请求用户确认后联网搜索。
+基于 **LangChain + LangGraph + MongoDB Atlas + Next.js + Electron** 的全栈 RAG 问答系统。支持上传私有文档建立知识库，通过检索增强生成（RAG）进行智能问答，并在知识库不足或问题需要公开实时信息时请求用户确认后联网搜索。提供 Web 端和桌面端（Electron）双端客户端。
 
 ## 架构预览
 
 ```
 用户输入
     │
-    ▼
-┌──────────────┐      ┌──────────────────────┐
-│  Next.js     │ SSE  │  Express Server       │
-│  前端 UI     │◄────►│  (TypeScript)         │
-│  (Chat UI)   │      │                      │
-└──────────────┘      │  ┌────────────────┐   │
-                      │  │  LangGraph      │   │
-                      │  │  Agent 状态机   │   │
-                      │  └────────────────┘   │
-                      │  ┌────────────────┐   │
-                      │  │  RAG Pipeline   │   │
-                      │  └────────────────┘   │
-                      │  ┌────────────────┐   │
-                      │  │  Web Search     │   │
-                      │  │  (Tavily)       │   │
-                      │  └────────────────┘   │
-                      └──────────────────────┘
-                               │
-                    ┌──────────┴──────────┐
-                    ▼                     ▼
-            ┌──────────────┐    ┌──────────────────┐
-            │  MongoDB     │    │  OpenAI API       │
-            │  Atlas       │    │  Embedding + LLM  │
-            │  向量与历史存储 │    └──────────────────┘
-            └──────────────┘
+    ├──────────────────────────┐
+    ▼                          ▼
+┌──────────────┐    ┌──────────────────┐
+│  Next.js     │    │  Electron 桌面端   │
+│  Web 端 UI   │    │  (React + Radix)  │
+│  (Chat + KB) │    │  Chat + KB 双窗口 │
+└──────────────┘    └──────────────────┘
+    │                          │
+    └──────────┬───────────────┘
+               │ SSE / HTTP
+               ▼
+      ┌──────────────────────┐
+      │  Express Server       │
+      │  (TypeScript)         │
+      │                       │
+      │  ┌────────────────┐   │
+      │  │  LangGraph      │   │
+      │  │  Agent 状态机    │   │
+      │  └────────────────┘   │
+      │  ┌────────────────┐   │
+      │  │  RAG Pipeline   │   │
+      │  └────────────────┘   │
+      │  ┌────────────────┐   │
+      │  │  Web Search     │   │
+      │  │  (Tavily)       │   │
+      │  └────────────────┘   │
+      └──────────────────────┘
+               │
+    ┌──────────┴──────────┐
+    ▼                     ▼
+┌──────────────┐    ┌──────────────────┐
+│  MongoDB     │    │  OpenAI API       │
+│  Atlas       │    │  Embedding + LLM  │
+│  向量与历史存储 │    └──────────────────┘
+└──────────────┘
 ```
 
 ## 核心特性
@@ -75,11 +85,13 @@ Agent 的核心工作流：
 - **引用标注**：答案附带知识库文档或网页来源引用
 
 ### 前端 UI
-- **Next.js 16 + React 19**，Tailwind CSS v4 样式
-- **shadcn/ui** 组件库（Radix UI 原语）
-- **知识库管理面板**：上传文件、查看文件列表、删除文件、去重检测
+
+- **Web 端**：Next.js 16 + React 19，Tailwind CSS v4 样式，shadcn/ui 组件库（Radix UI 原语）
+- **桌面端**：Electron + React 19，Tailwind CSS v4 + Radix UI，与 Web 端共享 UI 组件和 hooks
+- **知识库管理面板**：上传文件、查看文件列表、删除文件、去重检测（Web 端内嵌页面，桌面端独立窗口）
 - **联网搜索确认对话框**：Agent 需要联网时请求用户确认
 - **引用展示**：知识库文档和网页来源的链接展示
+- **打字机效果**：前端通过 `requestAnimationFrame` 逐字显示
 
 ## 技术栈
 
@@ -97,7 +109,7 @@ Agent 的核心工作流：
 | **Multer** | 文件上传处理 |
 | **Zod** | 运行时环境变量和数据结构校验 |
 
-### 前端
+### 前端（Web）
 
 | 技术 | 用途 |
 |------|------|
@@ -107,6 +119,17 @@ Agent 的核心工作流：
 | **Radix UI** | 无障碍 UI 原语 |
 | **Lucide React** | 图标库 |
 | **class-variance-authority** | 组件样式变体管理 |
+
+### 桌面端
+
+| 技术 | 用途 |
+|------|------|
+| **Electron** | 桌面应用框架 |
+| **electron-vite** | 构建工具 |
+| **React 19** | UI 构建 |
+| **Tailwind CSS v4** | 原子化样式 |
+| **Radix UI** | 无障碍 UI 原语 |
+| **electron-builder** | 跨平台打包（macOS/Windows/Linux） |
 
 ## 快速开始
 
@@ -173,7 +196,37 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:5000
 npm run dev
 ```
 
-### 3. 检索实现说明
+### 3. 启动桌面端
+
+桌面端基于 Electron，提供 Chat 和知识库管理双窗口，启动时会自动拉起后端服务。
+
+```bash
+cd desktop
+npm install
+npm run dev
+```
+
+开发环境会通过 `electron-vite dev` 启动，自动打开 Electron 窗口并连接后端 API。
+
+构建分发版本：
+
+```bash
+cd desktop
+npm run build    # 构建渲染进程
+npm run preview # 预览构建产物的桌面应用
+```
+
+跨平台打包（macOS dmg/zip、Windows nsis、Linux AppImage）：
+
+```bash
+npx electron-builder
+```
+
+打包产物输出到 `desktop/release/` 目录。
+
+> 桌面端自动管理后端进程：开发模式下通过 `npx tsx` 启动后端，生产构建后通过 `node dist/index.js` 启动。
+
+### 4. 检索实现说明
 
 当前版本会将文本片段和 embedding 存入 MongoDB Atlas，并默认通过 Atlas `$vectorSearch` 在数据库侧执行向量检索，避免后端全表读取 embedding 后再计算相似度。需要在 Atlas 中为 `kb_chunks` 集合创建 Vector Search index：
 
@@ -227,6 +280,33 @@ agent-with-rag/
 │   │   └── index.ts                  # Express 服务入口
 │   ├── package.json
 │   └── tsconfig.json
+├── desktop/                          # Electron 桌面端
+│   ├── electron/
+│   │   ├── main.ts                   # 主进程（启动后端、管理窗口）
+│   │   └── preload/
+│   │       ├── kb.preload.ts         # 知识库窗口 preload
+│   │       └── main.preload.ts       # 主窗口 preload
+│   ├── src/
+│   │   ├── main/                     # 主窗口（对话）
+│   │   │   ├── components/           # ChatArea, ChatRow 等
+│   │   │   ├── hooks/                # use-agent-chat
+│   │   │   ├── App.tsx
+│   │   │   └── main.tsx
+│   │   ├── kb/                       # 知识库管理窗口
+│   │   │   ├── components/           # KbFileList, KbUpload 等
+│   │   │   ├── hooks/                # use-kb-files
+│   │   │   ├── App.tsx
+│   │   │   └── main.tsx
+│   │   └── shared/                   # 与 Web 前端共享的代码
+│   │       ├── components/ui/        # shadcn/ui 组件
+│   │       ├── hooks/                # use-typewriter
+│   │       ├── lib/                  # SSE 客户端、工具函数
+│   │       └── types/                # 类型定义
+│   ├── electron.vite.config.ts
+│   ├── electron-builder.yml
+│   ├── main.html
+│   ├── kb.html
+│   └── package.json
 ├── frontend/
 │   ├── src/
 │   │   ├── app/
