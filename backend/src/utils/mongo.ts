@@ -3,6 +3,7 @@ import { resolve4, resolve6, resolveSrv } from "dns/promises";
 import { env } from "./env";
 
 let client: MongoClient | null = null;
+let clientPromise: Promise<MongoClient> | null = null;
 let db: Db | null = null;
 
 export class MongoDnsHijackError extends Error {
@@ -78,6 +79,36 @@ function isReservedIpv4ForTesting(ip: string): boolean {
   return a === 198 && (b === 18 || b === 19);
 }
 
+export function isMongoConnectionError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const errorWithCode = error as NodeJS.ErrnoException;
+  const mongoConnectionErrorNames = new Set([
+    "MongoNetworkError",
+    "MongoNetworkTimeoutError",
+    "MongoServerSelectionError",
+  ]);
+  const networkErrorCodes = new Set([
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+    "ENOTFOUND",
+    "ETIMEDOUT",
+    "ETIMEOUT",
+  ]);
+
+  return (
+    mongoConnectionErrorNames.has(error.name) ||
+    (typeof errorWithCode.code === "string" &&
+      networkErrorCodes.has(errorWithCode.code)) ||
+    errorWithCode.syscall === "querySrv" ||
+    errorWithCode.syscall === "getaddrinfo"
+  );
+}
+
 async function detectSuspiciousAtlasDns(uri: string): Promise<{
   host: string;
   resolvedIps: string[];
@@ -113,6 +144,7 @@ async function detectSuspiciousAtlasDns(uri: string): Promise<{
 
 export async function getMongoClient(): Promise<MongoClient> {
   if (client) return client;
+  if (clientPromise) return clientPromise;
 
   const uri = env.MONGODB_ATLAS_URI;
 
@@ -122,33 +154,44 @@ export async function getMongoClient(): Promise<MongoClient> {
     );
   }
 
-  client = new MongoClient(uri, {
-    serverSelectionTimeoutMS: 10_000,
-    connectTimeoutMS: 10_000,
-    socketTimeoutMS: 20_000,
-    retryReads: true,
-    retryWrites: true,
-  });
+  clientPromise = (async () => {
+    const mongoClient = new MongoClient(uri, {
+      serverSelectionTimeoutMS: 10_000,
+      connectTimeoutMS: 10_000,
+      socketTimeoutMS: 20_000,
+      retryReads: true,
+      retryWrites: true,
+    });
 
-  try {
-    await client.connect();
-  } catch (error) {
-    const dnsCheck = await detectSuspiciousAtlasDns(uri);
-    if (dnsCheck?.suspicious) {
-      throw new MongoDnsHijackError({
-        host: dnsCheck.host,
-        resolvedIps: dnsCheck.resolvedIps,
-        cause: error,
-      });
+    try {
+      await mongoClient.connect();
+    } catch (error) {
+      client = null;
+      db = null;
+      await mongoClient.close().catch(() => undefined);
+
+      const dnsCheck = await detectSuspiciousAtlasDns(uri);
+      if (dnsCheck?.suspicious) {
+        throw new MongoDnsHijackError({
+          host: dnsCheck.host,
+          resolvedIps: dnsCheck.resolvedIps,
+          cause: error,
+        });
+      }
+
+      console.error("[mongo] Failed to connect to MongoDB", error);
+      throw error;
     }
 
-    console.error("[mongo] Failed to connect to MongoDB", error);
-    throw error;
-  }
+    client = mongoClient;
+    console.log("Connected to mongodb");
 
-  console.log("Connected to mongodb");
+    return mongoClient;
+  })().finally(() => {
+    clientPromise = null;
+  });
 
-  return client;
+  return clientPromise;
 }
 
 export async function getDb(): Promise<Db> {

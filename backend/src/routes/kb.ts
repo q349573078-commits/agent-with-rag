@@ -4,17 +4,17 @@ import { extname } from "path";
 import { createHash } from "crypto";
 import multer, { MulterError } from "multer";
 import { nanoid } from "nanoid";
-import {
-  MongoNetworkError,
-  MongoServerError,
-  MongoServerSelectionError,
-  ObjectId,
-} from "mongodb";
+import { MongoServerError, ObjectId } from "mongodb";
 import { loadFileAsDocuments } from "../kb/01_loaders";
 import { splitDocuments } from "../kb/02_splitter";
 import { ingestDocuments } from "../kb/04_ingest";
 import { getKbCollection, getKbFilesCollection } from "../kb/03_vectorStore";
-import { getMongoConnectionInfo, MongoDnsHijackError } from "../utils/mongo";
+import { isLocalKbCollection } from "../kb/localStore";
+import {
+  getMongoConnectionInfo,
+  isMongoConnectionError,
+  MongoDnsHijackError,
+} from "../utils/mongo";
 
 export const kbRouter = Router();
 
@@ -69,14 +69,11 @@ function getUploadErrorResponse(error: unknown): {
     };
   }
 
-  if (
-    error instanceof MongoServerSelectionError ||
-    error instanceof MongoNetworkError
-  ) {
+  if (isMongoConnectionError(error)) {
     return {
       statusCode: 503,
       message:
-        "MongoDB is unavailable. Please check MONGODB_ATLAS_URI / MONGODB_DB_NAME, Atlas IP Access List, and network access to port 27017.",
+        "MongoDB is unavailable or DNS resolution failed. Please check MONGODB_ATLAS_URI / MONGODB_DB_NAME, Atlas IP Access List, DNS/VPN, and network access to port 27017.",
     };
   }
 
@@ -99,14 +96,11 @@ function getKbFilesErrorResponse(error: unknown): {
   statusCode: number;
   message: string;
 } {
-  if (
-    error instanceof MongoServerSelectionError ||
-    error instanceof MongoNetworkError
-  ) {
+  if (isMongoConnectionError(error)) {
     return {
       statusCode: 503,
       message:
-        "MongoDB is unavailable. Please check MONGODB_ATLAS_URI / MONGODB_DB_NAME, Atlas IP Access List, and network access to port 27017.",
+        "MongoDB is unavailable or DNS resolution failed. Please check MONGODB_ATLAS_URI / MONGODB_DB_NAME, Atlas IP Access List, DNS/VPN, and network access to port 27017.",
     };
   }
 
@@ -174,12 +168,16 @@ kbRouter.get("/health", async (_req, res) => {
   try {
     const collection = await getKbCollection();
     await collection.db.command({ ping: 1 });
+    const usingLocalStore = isLocalKbCollection(collection);
 
     return res.status(200).json({
       ok: true,
       mongo: {
-        ok: true,
+        ok: !usingLocalStore,
         ...mongo,
+      },
+      storage: {
+        backend: usingLocalStore ? "local_file" : "mongodb",
       },
     });
   } catch (error) {

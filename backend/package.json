@@ -10,6 +10,7 @@
     "@types/cors": "^2.8.19",
     "@types/multer": "^2.0.0",
     "@types/node": "^24.9.1",
+    "@types/pdf-parse": "^1.1.5",
     "cors": "^2.8.5",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
@@ -29,7 +30,7 @@
     "mongodb": "^7.0.0",
     "multer": "^2.0.2",
     "nanoid": "^5.1.6",
-    "pdf-parse": "2.4.5",
+    "pdf-parse": "^1.1.4",
     "zod": "^3.25.76"
   },
   "keywords": [],

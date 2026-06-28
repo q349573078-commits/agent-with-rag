@@ -1,6 +1,6 @@
 import { Document } from "@langchain/core/documents";
-import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
-import { TextLoader } from "@langchain/classic/document_loaders/fs/text";
+import { readFile } from "fs/promises";
+import pdfParse from "pdf-parse";
 
 interface LoadFileArgs {
   filePath: string;
@@ -33,28 +33,36 @@ export async function loadFileAsDocuments(
   const isPdf = mimeType === "application/pdf" || extractExt === "pdf";
 
   if (isPdf) {
-    const loader = new PDFLoader(filePath);
-    const docs = await loader.load();
+    const buffer = await readFile(filePath);
+    const result = await pdfParse(buffer);
 
-    return docs.map((doc) => ({
-      ...doc,
-      metadata: {
-        ...doc.metadata,
-        source: decodedOriginalName,
-      },
-    }));
+    const text = typeof result.text === "string" ? result.text.trim() : "";
+    return text
+      ? [
+        new Document({
+          pageContent: text,
+          metadata: {
+            source: decodedOriginalName,
+            totalPages: result.numpages,
+          },
+        }),
+      ]
+      : [];
   }
 
   if (isText || isMarkdown) {
-    const loader = new TextLoader(filePath);
-    const docs = await loader.load();
-    return docs.map((doc) => ({
-      ...doc,
-      metadata: {
-        ...doc.metadata,
-        source: decodedOriginalName,
-      },
-    }));
+    const text = await readFile(filePath, "utf8");
+    const trimmedText = text.trim();
+    return trimmedText
+      ? [
+        new Document({
+          pageContent: trimmedText,
+          metadata: {
+            source: decodedOriginalName,
+          },
+        }),
+      ]
+      : [];
   }
 
   return [];

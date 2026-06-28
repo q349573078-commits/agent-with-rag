@@ -21,6 +21,7 @@ pnpm-debug.log*
 
 # runtime/temp files
 uploads/
+data/
 tmp/
 temp/
 

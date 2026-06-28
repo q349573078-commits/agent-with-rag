@@ -1,8 +1,9 @@
 import { MongoDBAtlasVectorSearch } from "@langchain/mongodb";
 import { Collection as MongoCollection } from "mongodb";
-import { getDb } from "../utils/mongo";
+import { getDb, isMongoConnectionError } from "../utils/mongo";
 import { embeddings } from "../utils/openai";
 import { env } from "../utils/env";
+import { getLocalKbCollection } from "./localStore";
 
 const KB_COLLECTION_NAME = "kb_chunks";
 const KB_FILES_COLLECTION_NAME = "kb_files";
@@ -11,12 +12,33 @@ let collectionPromise: Promise<MongoCollection> | null = null;
 let filesCollectionPromise: Promise<MongoCollection> | null = null;
 let vectorStorePromise: Promise<MongoDBAtlasVectorSearch> | null = null;
 
+async function getMongoCollectionOrLocal(
+  mongoCollectionName: string,
+  localCollectionName: "kb_chunks" | "kb_files"
+): Promise<MongoCollection> {
+  try {
+    const db = await getDb();
+    return db.collection(mongoCollectionName);
+  } catch (error) {
+    if (!isMongoConnectionError(error)) {
+      throw error;
+    }
+
+    console.warn(
+      `[kb] MongoDB is unavailable; using local file store for ${localCollectionName}. ${error instanceof Error ? error.message : String(error)}`
+    );
+    return getLocalKbCollection(localCollectionName) as any;
+  }
+}
+
 export async function getKbCollection(): Promise<MongoCollection> {
   if (!collectionPromise) {
     collectionPromise = (async () => {
-      const db = await getDb();
-      return db.collection(KB_COLLECTION_NAME);
-    })();
+      return getMongoCollectionOrLocal(KB_COLLECTION_NAME, "kb_chunks");
+    })().catch((error) => {
+      collectionPromise = null;
+      throw error;
+    });
   }
 
   return collectionPromise;
@@ -25,8 +47,10 @@ export async function getKbCollection(): Promise<MongoCollection> {
 export async function getKbFilesCollection(): Promise<MongoCollection> {
   if (!filesCollectionPromise) {
     filesCollectionPromise = (async () => {
-      const db = await getDb();
-      const collection = db.collection(KB_FILES_COLLECTION_NAME);
+      const collection = await getMongoCollectionOrLocal(
+        KB_FILES_COLLECTION_NAME,
+        "kb_files"
+      );
 
       await Promise.all([
         collection.createIndex(
@@ -47,7 +71,10 @@ export async function getKbFilesCollection(): Promise<MongoCollection> {
       ]);
 
       return collection;
-    })();
+    })().catch((error) => {
+      filesCollectionPromise = null;
+      throw error;
+    });
   }
 
   return filesCollectionPromise;
@@ -66,7 +93,10 @@ export async function getVectorStore(): Promise<MongoDBAtlasVectorSearch> {
       });
 
       return vectorStore;
-    })();
+    })().catch((error) => {
+      vectorStorePromise = null;
+      throw error;
+    });
   }
 
   return vectorStorePromise;
