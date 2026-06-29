@@ -184,7 +184,7 @@ class LocalCursor:
 
         for key, direction in reversed(entries):
             items.sort(
-                key=lambda d: _get_path_value(d, key) or "",
+                key=lambda d: _get_path_value(d, key) if _get_path_value(d, key) is not None else "",
                 reverse=(direction == -1),
             )
         self._docs = items
