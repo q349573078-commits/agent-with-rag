@@ -32,4 +32,4 @@ def is_mongo_connection_error(error: Exception) -> bool:
     if isinstance(error, (ConnectionFailure, ServerSelectionTimeoutError)):
         return True
     msg = str(error).lower()
-    return any(kw in msg for kw in ("connectionrefused", "timeout", "dns", "econnrefused"))
+    return any(kw in msg for kw in ("connection refused", "timeout", "dns", "econnrefused"))
