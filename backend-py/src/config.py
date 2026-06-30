@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     """从环境变量加载的应用配置。"""
 
     # 服务端口
-    PORT: int = 4000
+    PORT: int = 3001
 
     # OpenAI
     OPENAI_API_KEY: str = ""

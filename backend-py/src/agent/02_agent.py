@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Literal, Callable, Awaitable
+from typing import Any, Dict, List, Optional, Literal, Callable, Awaitable, TypedDict
 
 from langchain_core.documents import Document
 from langgraph.graph import StateGraph, START, END
@@ -51,6 +51,24 @@ DEFAULT_QUERY_PLAN = {
     "answerStyle": "concise",
     "riskLevel": "low",
 }
+
+
+class AgentState(TypedDict, total=False):
+    """Agent 状态 schema，确保 LangGraph 正确合并各节点的返回值。"""
+    messages: List[dict]
+    queryPlan: dict
+    question: str
+    docs: List[Document]
+    citations: List[dict]
+    confidence: float
+    fallbackReason: Optional[str]
+    shouldAskWebSearch: bool
+    answerSource: str
+    webResults: List[dict]
+    webSearchDecision: Optional[str]
+    webSearchError: Optional[str]
+    reflectionAction: str
+    answer: str
 
 # 全局 checkpointer
 _checkpointer: Optional[MemorySaver] = None
@@ -300,7 +318,8 @@ def _create_agent_graph(
             fallback_reason = "low_confidence"
 
         final_docs = docs
-        if not fallback_reason and settings.RERANK_ENABLED and len(docs) > 1:
+        # 只有无文档时才跳过重排序；低置信度也尝试重排
+        if fallback_reason != "no_retrieval" and settings.RERANK_ENABLED and len(docs) > 1:
             if on_stage:
                 await on_stage("reranking")
             try:
@@ -313,16 +332,19 @@ def _create_agent_graph(
                 logger.warning(f"重排序失败: {e}")
                 final_docs = docs[: settings.RERANK_TOP_K]
 
-        if not fallback_reason:
+        if fallback_reason != "no_retrieval":
             final_docs = final_docs[: settings.RERANK_TOP_K]
 
-        citations = _build_kb_citations(final_docs) if not fallback_reason else []
+        citations = _build_kb_citations(final_docs) if final_docs else []
+
+        # 只有无文档或计划明确要求时才走联网搜索确认；低置信度时先让 KB 回答，由反思节点决定是否需要联网
+        should_ask_web = plan.get("needsWebSearch", False) or fallback_reason == "no_retrieval"
 
         return {
             "docs": final_docs, "citations": citations,
             "confidence": confidence, "fallbackReason": fallback_reason,
             "question": question,
-            "shouldAskWebSearch": plan.get("needsWebSearch", False) or bool(fallback_reason),
+            "shouldAskWebSearch": should_ask_web,
             "answerSource": "none",
             "webResults": [], "webSearchDecision": None,
             "webSearchError": None, "reflectionAction": "accept",
@@ -495,6 +517,13 @@ def _create_agent_graph(
         if not answer.strip() or answer in (
             FALLBACK_ANSWER, WEB_SEARCH_CANCELLED, WEB_SEARCH_EMPTY, WEB_SEARCH_NO_API_KEY,
         ):
+            # KB 回答失败时，建议联网搜索
+            if answer == FALLBACK_ANSWER and answer_source == "kb":
+                return {
+                    "reflectionAction": "ask_web_search",
+                    "fallbackReason": "low_confidence",
+                    "shouldAskWebSearch": True,
+                }
             return {"reflectionAction": "accept"}
 
         context = _format_web_context(web_results) if answer_source == "web" else _format_kb_context(docs)
@@ -548,7 +577,7 @@ def _create_agent_graph(
         return {"answer": WEB_SEARCH_CANCELLED, "answerSource": "none", "citations": []}
 
     # 构建图
-    builder = StateGraph(dict)
+    builder = StateGraph(AgentState)
 
     builder.add_node("plan_query", _plan_query)
     builder.add_node("retrieve", _retrieve)
@@ -615,18 +644,16 @@ async def run_agent(
     else:
         result = await graph.ainvoke({"messages": messages}, config)
 
-    try:
-        if hasattr(graph, "is_interrupted") and graph.is_interrupted(result):
-            import langgraph
-            interrupt_data = result.get(langgraph.types.INTERRUPT, [])
-            if interrupt_data and hasattr(interrupt_data[0], "value"):
-                return {"type": "interrupt", "interrupt": interrupt_data[0].value}
-            return {"type": "interrupt", "interrupt": {
-                "type": "web_search_confirmation",
-                "message": "是否需要联网搜索？",
-            }}
-    except Exception:
-        pass
+    # 检查中断
+    interrupt_data = result.get("__interrupt__", [])
+    if interrupt_data:
+        interrupt_value = interrupt_data[0]
+        if hasattr(interrupt_value, "value"):
+            return {"type": "interrupt", "interrupt": interrupt_value.value}
+        return {"type": "interrupt", "interrupt": {
+            "type": "web_search_confirmation",
+            "message": "是否需要联网搜索？",
+        }}
 
     return {
         "type": "done",

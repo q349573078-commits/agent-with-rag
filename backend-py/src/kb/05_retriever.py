@@ -105,7 +105,7 @@ async def _retrieve_with_app_cosine(query_embedding: list, k: int = 5) -> dict:
     """应用层余弦相似度检索（全量加载后计算）。"""
     collection = await get_kb_collection()
 
-    stored = collection.find(
+    stored = await collection.find(
         {
             "text": {"$type": "string"},
             "embedding": {"$type": "array"},
@@ -138,6 +138,7 @@ async def _retrieve_with_app_cosine(query_embedding: list, k: int = 5) -> dict:
 async def _retrieve_with_atlas_vector_search(query_embedding: list, k: int = 5) -> dict:
     """MongoDB Atlas 向量搜索。"""
     collection = await get_kb_collection()
+    is_local = getattr(collection, "isLocalKbCollection", False)
     num_candidates = max(
         settings.VECTOR_SEARCH_NUM_CANDIDATES,
         k * VECTOR_SEARCH_NUM_CANDIDATE_MULTIPLIER,
@@ -168,7 +169,11 @@ async def _retrieve_with_atlas_vector_search(query_embedding: list, k: int = 5) 
 
     results = []
     for chunk in stored:
-        score = _atlas_score_to_cosine(chunk.get("score", 0))
+        if is_local:
+            # 本地存储已输出 [0,1] 归一化分数（与 Atlas 一致），无需再转换
+            score = chunk.get("score", 0)
+        else:
+            score = _atlas_score_to_cosine(chunk.get("score", 0))
         doc = _chunk_to_document(chunk)
         if doc.page_content.strip():
             results.append((doc, score))

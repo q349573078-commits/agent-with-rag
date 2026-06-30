@@ -113,7 +113,7 @@ async def list_files():
     except Exception as e:
         logger.error(f"获取文件列表失败: {e}")
         return JSONResponse(
-            {"ok": False, "message": "获取文件列表失败"},
+            {"ok": False, "message": f"获取文件列表失败: {e}"},
             status_code=500,
         )
 

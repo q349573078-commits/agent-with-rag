@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+from datetime import datetime
 from bson import ObjectId
 from copy import deepcopy
 
@@ -36,6 +37,14 @@ def _load_data():
         for doc in parsed.get(key, []):
             if isinstance(doc.get("_id"), str) and ObjectId.is_valid(doc["_id"]):
                 doc["_id"] = ObjectId(doc["_id"])
+            # 将字符串时间戳还原为 datetime，避免 sort 时与 datetime 类型混用报错
+            for dt_field in ("uploadedAt", "createdAt", "updatedAt"):
+                val = doc.get(dt_field)
+                if isinstance(val, str):
+                    try:
+                        doc[dt_field] = datetime.fromisoformat(val)
+                    except ValueError:
+                        pass
 
     _data_promise = parsed
     return parsed
@@ -141,7 +150,11 @@ def _apply_projection(doc, projection=None):
     if not projection:
         return deepcopy(doc)
 
-    include_keys = [k for k, v in projection.items() if v == 1]
+    # 值为 1 的字段 + $meta 表达式（如 score: {$meta: "vectorSearchScore"}）
+    include_keys = [
+        k for k, v in projection.items()
+        if v == 1 or (isinstance(v, dict) and "$meta" in v)
+    ]
     if include_keys:
         result = {}
         for key in include_keys:
@@ -177,10 +190,16 @@ class LocalCursor:
     def __init__(self, docs):
         self._docs = list(docs) if docs else []
 
-    def sort(self, spec):
-        """排序，spec 如 {'uploadedAt': -1}。"""
+    def sort(self, spec, direction=None):
+        """排序，兼容 pymongo 的 sort(key, direction) 和 sort([(k, d)]) 两种调用方式。"""
         items = list(self._docs)
-        entries = list(spec.items()) if isinstance(spec, dict) else spec
+        if isinstance(spec, str):
+            # sort("key", direction) 形式
+            entries = [(spec, direction if direction is not None else 1)]
+        elif isinstance(spec, dict):
+            entries = list(spec.items())
+        else:
+            entries = spec
 
         for key, direction in reversed(entries):
             items.sort(
@@ -195,7 +214,7 @@ class LocalCursor:
         self._docs = self._docs[:n]
         return self
 
-    def to_list(self, length=None):
+    async def to_list(self, length=None):
         """转换为列表。"""
         result = deepcopy(self._docs)
         if length is not None:
@@ -226,7 +245,7 @@ class LocalKbCollection:
         return LocalCursor(docs)
 
     async def find_one(self, filter_dict=None, projection=None):
-        docs = self.find(filter_dict, projection).limit(1).to_list()
+        docs = await self.find(filter_dict, projection).limit(1).to_list()
         return docs[0] if docs else None
 
     # --- 写入 ---
