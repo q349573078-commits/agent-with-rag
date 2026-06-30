@@ -8,7 +8,7 @@ from src.config import settings
 
 app = FastAPI(
     title="中文 RAG 后端",
-    description="基于 BGE 模型的中文优化 RAG 问答系统",
+    description="基于 OpenAI 的中文 RAG 问答系统",
     version="0.1.0",
 )
 

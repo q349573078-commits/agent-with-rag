@@ -1,80 +1,70 @@
-# backend-py — Python 版中文优化 RAG 后端
+# backend-py — Python 版 RAG 问答后端
 
-基于 FastAPI + LangGraph + BGE 中文模型的知识库问答后端。
+基于 FastAPI + LangGraph + OpenAI 的知识库问答后端，支持 PDF/TXT/Markdown 文档上传与向量检索。
 
 ## 快速开始
 
 ```bash
 cd backend-py
 
-# 安装依赖
+# 创建虚拟环境并安装依赖
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
 
-# 配置环境变量
-cp ../backend/.env .env   # 复用 TS 后端的 .env 配置
-# 编辑 .env 添加 BGE 相关配置（见下方）
+# 配置环境变量（见下方）
+cp .env.example .env   # 编辑 .env 填入 OPENAI_API_KEY
 
-# 启动开发服务器
-uvicorn src.main:app --reload --host 0.0.0.0 --port 4000
+# 启动开发服务器（端口冲突时自动重试 +1，最多 20 次）
+python -m src.main
 ```
 
 ## 环境变量
 
+配置文件读取 `.env`（pydantic-settings）。
+
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `PORT` | 服务端口 | `4000` |
-| `OPENAI_API_KEY` | OpenAI API 密钥（LLM 调用） | — |
-| `OPENAI_BASE_URL` | OpenAI 兼容 API 地址 | `https://api.openai.com/v1` |
-| `MONGODB_ATLAS_URI` | MongoDB Atlas 连接串 | — |
-| `MONGODB_DB_NAME` | MongoDB 数据库名 | `agent_rag` |
-| `TAVILY_API_KEY` | Tavily 联网搜索 API 密钥 | — |
-| `EMBEDDING_BACKEND` | embedding 后端：`bge` / `openai` | `bge` |
-| `BGE_MODEL_NAME` | BGE embedding 模型名 | `BAAI/bge-large-zh-v1.5` |
-| `EMBEDDING_BATCH_SIZE` | 批量 embedding 大小 | `32` |
-| `RERANK_ENABLED` | 是否启用重排序 | `false` |
-| `RERANKER_MODEL_NAME` | 重排序模型名 | `BAAI/bge-reranker-v2-m3` |
+| `PORT` | 服务端口 | `3001` |
+| `OPENAI_API_KEY` | OpenAI API 密钥（必填） | — |
+| `TAVILY_API_KEY` | Tavily 联网搜索 API 密钥（可选） | — |
+| `MONGODB_ATLAS_URI` | MongoDB Atlas 连接串（可选，无则降级本地存储） | — |
+| `MONGODB_DB_NAME` | MongoDB 数据库名 | `agentic-rag` |
+| `LLM_MODEL` | 对话/重排序/反思模型 | `gpt-4o-mini` |
+| `LLM_TEMPERATURE` | 答案生成温度 | `0.2` |
+| `EMBEDDING_MODEL` | Embedding 模型 | `text-embedding-3-small` |
+| `RERANK_ENABLED` | 是否启用 LLM 重排序 | `false` |
 | `RERANK_CANDIDATES` | 重排序候选数 | `20` |
-| `RERANK_TOP_K` | 重排序返回数 | `4` |
-| `RETRIEVAL_MIN_SCORE` | 检索最低相似度阈值 | `0.5` |
-| `RETRIEVAL_LOW_CONFIDENCE_THRESHOLD` | 触发联网搜索的置信度阈值 | `0.6` |
+| `RERANK_TOP_K` | 重排序后保留数 | `4` |
 | `RETRIEVAL_BACKEND` | 检索后端：`atlas_vector` / `app_cosine` | `atlas_vector` |
-| `VECTOR_STORE` | 向量存储：`mongodb` / `chromadb` | `mongodb` |
+| `RETRIEVAL_MIN_SCORE` | 检索最低相似度阈值 | `0.5` |
+| `RETRIEVAL_LOW_CONFIDENCE_THRESHOLD` | 低置信度触发反思阈值 | `0.6` |
 | `KB_VECTOR_INDEX_NAME` | Atlas Vector Search 索引名 | `kb_vector_index` |
 | `VECTOR_SEARCH_NUM_CANDIDATES` | 向量搜索候选数 | `100` |
-| `CHROMA_PERSIST_DIR` | ChromaDB 持久化目录 | `data/chroma` |
-| `CHINESE_SPLITTER_STRATEGY` | 分割策略：`jieba` / `recursive` | `jieba` |
-| `JIEBA_USER_DICT` | jieba 自定义词典路径 | — |
-| `LLM_MODEL` | LLM 模型名 | `gpt-4o-mini` |
-| `LLM_TEMPERATURE` | LLM 温度 | `0.1` |
-
-## BGE 模型下载
-
-首次启动时，BGE 模型会自动从 HuggingFace 下载到本地缓存（`~/.cache/huggingface/`）。
-
-- **bge-large-zh-v1.5**: ~1.3GB，用于生成中文文本向量（1024 维）
-- **bge-reranker-v2-m3**: ~2.3GB，用于检索结果重排序
-
-如需离线部署，提前下载：
-
-```bash
-pip install huggingface-hub
-huggingface-cli download BAAI/bge-large-zh-v1.5
-huggingface-cli download BAAI/bge-reranker-v2-m3
-```
 
 ## API 接口
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/kb/health` | 知识库健康检查 |
-| `GET` | `/kb/files` | 列出已摄入文件 |
+| `GET` | `/` | 服务健康检查 |
+| `GET` | `/kb/health` | 知识库健康检查（含存储后端信息） |
+| `GET` | `/kb/files` | 列出已上传文件 |
 | `GET` | `/kb/files/exists?name=...&hash=...` | 检查文件是否已存在 |
-| `POST` | `/kb/upload` | 上传文件（multipart） |
-| `DELETE` | `/kb/files/:id` | 按 ID 删除文件 |
-| `DELETE` | `/kb/files?name=...&hash=...` | 按名称/Hash 删除文件 |
+| `POST` | `/kb/upload` | 上传文件（multipart，支持 .pdf/.txt/.md/.markdown，最大 20MB） |
+| `DELETE` | `/kb/files/:id` | 按 ID 删除文件及关联 chunks |
+| `DELETE` | `/kb/files?name=...&hash=...` | 按名称/SHA256 删除文件 |
 | `POST` | `/agent/chat` | SSE 流式对话 |
 
-接口签名与 TypeScript 版后端完全兼容，前端无需修改。
+### Agent 对话请求体
+
+```json
+{
+  "message": "什么是防抖",
+  "threadId": "可选，用于多轮对话"
+}
+```
+
+支持联网搜索中断/恢复：当检索置信度过低时，Agent 会通过 `action_required` 事件询问是否联网搜索，客户端携带 `webSearchDecision: "confirm" | "cancel"` 恢复对话。
 
 ## 项目结构
 
@@ -82,27 +72,59 @@ huggingface-cli download BAAI/bge-reranker-v2-m3
 backend-py/
 ├── pyproject.toml
 ├── src/
-│   ├── main.py               # FastAPI 入口
-│   ├── config.py              # 环境变量配置
+│   ├── main.py                # FastAPI 入口，端口冲突自动重试
+│   ├── config.py              # pydantic-settings 配置管理
 │   ├── agent/
-│   │   ├── policy.py           # 中文 Agent 系统提示词
-│   │   ├── agent.py            # LangGraph 状态机
-│   │   └── memory.py           # 对话历史管理
-│   ├── rag/
-│   │   ├── splitter.py         # jieba 中文文本分割器
-│   │   ├── embeddings.py       # BGE + OpenAI embedding
-│   │   ├── reranker.py         # BGE 重排序模型
-│   │   ├── loaders.py          # 文档加载器（PyMuPDF + chardet）
-│   │   ├── vector_store.py     # MongoDB + ChromaDB 向量存储
-│   │   └── ingest.py           # 知识库摄入流水线
+│   │   ├── 01_policy.py       # 中文 Agent 系统提示词
+│   │   ├── 02_agent.py        # LangGraph 10 节点状态机
+│   │   └── 03_memory.py       # 对话历史管理（MongoDB + 内存降级）
+│   ├── kb/
+│   │   ├── 01_loaders.py      # 文档加载器（PyMuPDF PDF / UTF-8 TXT/MD）
+│   │   ├── 02_splitter.py     # 中文自适应文本分割器
+│   │   ├── 03_vector_store.py # 向量存储抽象层（MongoDB Atlas / 本地 JSON 降级）
+│   │   ├── 04_ingest.py       # 嵌入 + 批量写入向量存储
+│   │   ├── 05_retriever.py    # 检索器（Atlas 向量搜索 / 余弦相似度降级）
+│   │   └── local_store.py     # 本地 JSON 存储（模拟 MongoDB API）
 │   ├── routes/
-│   │   ├── agent.py            # Agent SSE 路由
-│   │   └── kb.py               # 知识库 CRUD 路由
+│   │   ├── agent.py           # Agent SSE 路由
+│   │   └── kb.py              # 知识库 CRUD 路由
+│   ├── utils/
+│   │   ├── llm.py             # LLM/Embedding 实例工厂
+│   │   └── mongo.py           # MongoDB 连接管理
 │   └── models/
-│       └── schemas.py          # Pydantic 数据模型
-├── uploads/                    # 临时上传目录
-└── data/                       # ChromaDB 持久化目录
+│       └── schemas.py         # Pydantic 数据模型
+├── uploads/                   # 临时上传目录（自动清理）
+└── data/                      # 本地存储持久化目录
+    └── kb-local-store.json    # 本地 JSON 向量存储（MongoDB 不可用时使用）
 ```
+
+## Agent 状态机
+
+10 节点 LangGraph 流水线：
+
+```
+START → plan_query → retrieve → rerank → answer_from_kb → reflect_answer → END
+                          ↓                        ↑
+                   ask_web_search → search_web → answer_from_web
+```
+
+- **plan_query**: LLM 规划检索计划，生成独立检索查询词
+- **retrieve**: 向量检索，无结果时触发联网搜索询问
+- **rerank**: LLM JSON 重排序（可选，默认关闭）
+- **answer_from_kb**: 基于知识库文档流式生成答案
+- **reflect_answer**: 答案质量反思，可能触发 rewrite 或联网搜索
+- **search_web → answer_from_web**: Tavily 联网搜索分支
+
+## 存储架构
+
+| 场景 | 存储后端 | 数据文件 |
+|------|---------|---------|
+| MongoDB Atlas 可用 | MongoDB `kb_chunks` / `kb_files` / `conversations` 集合 | Atlas 云端 |
+| MongoDB 不可用 | 本地 JSON 模拟 | `data/kb-local-store.json` |
+
+检索器同样支持双轨：
+- **atlas_vector**: 使用 MongoDB Atlas `$vectorSearch` 聚合管道
+- **app_cosine**: 应用层全量余弦相似度计算（Atlas 故障时自动 5 分钟降级）
 
 ## 与 TypeScript 版的差异
 
@@ -110,9 +132,9 @@ backend-py/
 |------|--------------|-----------|
 | 框架 | Express | FastAPI |
 | Agent | LangGraph TS | LangGraph Python |
-| Embedding | text-embedding-3-small | BGE-large-zh-v1.5（可切 OpenAI） |
-| 重排序 | LLM JSON 重排序 | BGE Cross-Encoder 模型 |
-| 文本分割 | 英文分隔符 | jieba 中文分词 + 中文标点 |
-| 编码处理 | UTF-8 | chardet 自动检测 GBK/UTF-8 |
-| 向量存储 | MongoDB Atlas | MongoDB Atlas + ChromaDB |
+| Embedding | text-embedding-3-small | text-embedding-3-small |
+| 重排序 | LLM JSON | LLM JSON |
+| 文本分割 | 英文分隔符 | 中文自适应分隔符 |
 | PDF 加载 | pdf-parse | PyMuPDF |
+| 向量存储 | MongoDB Atlas | MongoDB Atlas + 本地 JSON 降级 |
+| 联网搜索 | Tavily | Tavily |
